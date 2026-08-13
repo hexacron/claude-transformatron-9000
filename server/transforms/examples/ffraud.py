@@ -13,7 +13,7 @@ and its coverage is uneven (see the README's caveat on fraud scores).
 import ipaddress
 from typing import Any
 
-from maltego.entities import AS, DNSName, EmailAddress, IPv4Address, ISP, Location, Phrase
+from maltego.entities import AS, ISP, DNSName, EmailAddress, IPv4Address, Location, Phrase
 from maltego.model.context import MaltegoContext
 from maltego.model.exception import MaltegoException, MaltegoHTTPDataProviderNotFound
 from maltego.server import register_transform
