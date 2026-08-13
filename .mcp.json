@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "transformatron": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "${PWD}",
+        "python",
+        "-m",
+        "transformatron.mcp"
+      ],
+      "env": {}
+    }
+  }
+}

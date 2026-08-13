@@ -1,0 +1,7 @@
+.transformatron/
+.claude/settings.local.json
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
