@@ -64,6 +64,67 @@ this problem, not a sign the server is broken.
 The server binds to `127.0.0.1` only. That is fine for a client on the same machine, but a client
 on another host will not reach it.
 
+## Build your first transform
+
+Assumes `uv sync` has run. This is the whole loop, start to finish:
+
+```bash
+# 1. Certificates, once — the desktop client refuses plain HTTP.
+uv run python scripts/transformatron_cli.py certs
+
+# 2. Start the server.
+uv run python scripts/transformatron_cli.py start --ssl
+```
+
+Write a module under `server/transforms/`:
+
+```python
+# server/transforms/hello.py
+from maltego.entities import Domain, IPv4Address
+from maltego.model.context import MaltegoContext
+from maltego.server import register_transform
+
+
+@register_transform(display_name="Hello: IP to Domain", transform_set="hello")
+async def ip_to_domain(input_entity: IPv4Address, context: MaltegoContext) -> list[Domain]:
+    """Return a fixed domain, to prove the loop works."""
+    return [Domain(value="example.com")]
+```
+
+Both annotations matter: `IPv4Address` declares the input type, `list[Domain]` the output. A bare
+`-> list` registers the transform with output `NONE` and the client cannot route it.
+
+Register it in `server/project.py`, next to the existing transform imports:
+
+```python
+from transforms.hello import *  # noqa: F401,F403
+```
+
+The server only loads what `project.py` imports, and the import must sit with the others at the
+top — appending it to the end of the file puts it after the `if __name__ == "__main__"` block,
+where it still runs but registers nothing you can see. A transform that never appears in `list` is
+almost always this.
+
+```bash
+# 4. Reload and confirm.
+uv run python scripts/transformatron_cli.py restart
+uv run python scripts/transformatron_cli.py list
+
+# 5. Run it, and check the entity count — not just the success state.
+uv run python scripts/transformatron_cli.py run \
+  acme.new_maltego_integration.ip_to_domain maltego.IPv4Address 8.8.8.8
+
+# 6. Gate the whole set.
+uv run python scripts/smoke_test_transforms.py
+```
+
+Then [connect the desktop client](#connecting-to-the-maltego-desktop-client) and run it on a real
+graph.
+
+Coding agents get this same loop automatically: Claude Code from
+`.claude/skills/maltego-transform-author/`, other agents from
+[`AGENTS.md`](AGENTS.md). Both point at `docs/transform-authoring.md` rather than restating it.
+
 ## Writing transforms
 
 **Start with [`docs/transform-authoring.md`](docs/transform-authoring.md).**
@@ -165,9 +226,24 @@ Run it with `uv run python your_script.py`.
 
 ## The sample transforms
 
-`server/transforms/examples/ffraud.py` is an **illustrative sample, not a maintained
-integration**. It shows the shape of a working transform against
-[ffraud.com](https://ffraud.com/docs), a third-party IP reputation API this project has no
+Two worked examples ship with the project. Both are **illustrative samples, not maintained
+integrations** — delete whichever you do not need, along with its import in `server/project.py`.
+
+| Example | Shows |
+|---|---|
+| `server/transforms/examples/ffraud.py` | Single module, no API key — the minimal shape |
+| `server/transforms/ransomwarelive/` | Multi-module, API key, shared client layer |
+
+Start from `ffraud.py` if you are learning the shape. Start from `ransomwarelive/` if your API
+needs a key — it is documented in [`docs/ransomware-live.md`](docs/ransomware-live.md) and shows
+the parts the simple example cannot: declaring one credential across a whole transform set,
+keeping validation and error handling in a shared `api.py`, capping result sizes so a large
+upstream response does not flood the graph, and normalising a schema whose field names differ
+between endpoints. It needs a [ransomware.live](https://www.ransomware.live/) API key to run.
+
+### ffraud
+
+Against [ffraud.com](https://ffraud.com/docs), a third-party IP reputation API this project has no
 affiliation with. It needs no API key, so it runs on a fresh clone.
 
 Three transforms, all taking `maltego.IPv4Address`:
@@ -202,13 +278,17 @@ scripts/
   transformatron_cli.py     CLI front end
   smoke_test_transforms.py  runs every transform, fails on zero entities
 server/          SDK-generated (`maltego-transforms start server --with-skills`).
-                 Upstream-owned: excluded from ruff so regeneration does not churn.
+                 Upstream-owned except transforms/: .agents/ and project.py are
+                 excluded from ruff so regeneration does not churn.
   project.py     entrypoint; imports decide what gets registered
-  transforms/    your transform modules go here
+  transforms/    your transform modules go here — linted like the rest of the project
+.claude/skills/
+  maltego-transform-author/  authoring checklist; points at docs/, not a second copy
 docs/
   transform-authoring.md   read before writing a transform
+  ransomware-live.md       the authenticated worked example
   upstream-sdk-issue.md    draft bug report, not yet filed
-tests/           28 tests
+tests/           37 tests
 .transformatron/ runtime state — PID, log, certs, recorded scheme. Gitignored.
 ```
 
@@ -229,6 +309,14 @@ Things that cost real debugging time, recorded so they cost you less:
 
 - **A success state is not proof a transform works.** Check the entity count, or run
   `scripts/smoke_test_transforms.py`.
+
+- **An API key entered in the client can stop reaching the transform after a seed re-import.**
+  The symptom is a transform reporting the key as missing while the client's settings field still
+  looks populated. Re-importing after the seed URL changes — switching the server between HTTP and
+  HTTPS does this — rewrites the transform definitions and orphans the stored global value. Clear
+  the field, apply, then re-enter the key. See
+  [`docs/transform-authoring.md`](docs/transform-authoring.md) for the environment-variable
+  fallback that avoids this during development.
 
 - **The desktop client requires HTTPS** (see [above](#connecting-to-the-maltego-desktop-client)).
 
@@ -258,11 +346,18 @@ produce churn.
 
 ```bash
 uv run python scripts/smoke_test_transforms.py
+uv run python scripts/smoke_test_transforms.py --setting API_KEY=xxx
 ```
 
 Runs every registered transform against a sample input and **fails on zero entities** or an output
 type of `NONE` — the failure modes that otherwise report success. Exits non-zero, so it works as a
 gate. Run it after any change under `server/transforms/`.
+
+Transforms needing credentials take them through repeated `--setting KEY=VALUE`. Two outcomes
+report SKIP rather than FAIL — a missing credential, and an input the upstream has no match for —
+so an unconfigured key is never mistaken for broken code. A SKIP is not evidence a transform
+works; it means the gate could not judge it. Add a `TRANSFORM_SAMPLES` entry when the
+per-entity-type sample does not suit a transform.
 
 Transforms calling third-party APIs make live network requests, so a failure can mean an upstream
 outage rather than broken code; check the reported message. Override the input with `--value`, or

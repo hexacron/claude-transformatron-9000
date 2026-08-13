@@ -74,9 +74,11 @@ async def my_transform(input_entity: IPv4Address, context: MaltegoContext) -> li
 ## The loop
 
 1. Add or edit a module under `server/transforms/`.
-2. **Import it in `server/project.py`** — `from transforms.my_module import *`. The server only
-   registers what `project.py` imports. This is the most common reason a new transform never
-   appears.
+2. **Import it in `server/project.py`** — `from transforms.my_module import *`, alongside the
+   existing imports at the top of the file. The server only registers what `project.py` imports.
+   This is the most common reason a new transform never appears. Appending the import to the end
+   of the file does not work: it lands after the `if __name__ == "__main__"` block, so the module
+   is imported but nothing is registered by the time the server starts.
 3. Restart the server — this is the reload path.
 4. Confirm it registered with the right input/output types.
 5. Run it against a real input.
@@ -103,10 +105,25 @@ Run the whole suite at once:
 
 ```bash
 uv run python scripts/smoke_test_transforms.py
+uv run python scripts/smoke_test_transforms.py --setting RANSOMWARE_LIVE_API_KEY=xxx
 ```
 
 It runs every registered transform against a sample input and fails on zero entities or an output
 type of `NONE`. Use it after any change to `server/transforms/`.
+
+### Testing transforms that need credentials
+
+Pass each one with a repeated `--setting KEY=VALUE`, the same form the CLI uses. Two outcomes are
+deliberately reported as SKIP rather than FAIL, because treating them as failures teaches people
+to ignore the gate:
+
+- **A missing credential.** The transform says so explicitly; supply `--setting` to exercise it.
+- **An input with no upstream match.** One sample per entity type cannot suit every transform — a
+  `Company` sample that exercises a search is a substring, while a lookup needs a full
+  organisation name. Add a `TRANSFORM_SAMPLES` entry, keyed by transform id suffix, to give a
+  specific transform a better input.
+
+A SKIP is not evidence a transform works. It means the gate could not judge it.
 
 ## Routing to the SDK skills
 
@@ -134,6 +151,43 @@ target the right port and scheme.
 union-list return, validating `input_entity.value` before interpolating it into a URL, catching
 `MaltegoException` so an upstream outage degrades to an empty result rather than a crash, and
 using `.get()` throughout because the upstream omits fields rather than nulling them.
+
+`server/transforms/ransomwarelive/` is a larger, multi-module set built on an authenticated API —
+see `docs/ransomware-live.md`. It shows a shared `api.py` holding the API key setting, input
+validation and error handling, so the transform modules stay declarative, plus result caps and a
+schema whose field names differ between endpoints. Verify it with the project smoke test and
+`--setting RANSOMWARE_LIVE_API_KEY=<key>`.
+
+## API keys and the client re-import trap
+
+Declare a credential as `TransformSetting(auth=True, is_global=True)` and read it with
+`settings.get(NAME, "")`. `is_global=True` makes the Maltego client store one value for the whole
+namespace, so it is entered once. The SDK publishes the setting to discovery under a namespaced
+name (`global#<ns>.<NAME>`) and strips that prefix again before your transform sees it — look it
+up by the bare name.
+
+**Re-importing the seed can orphan the stored value.** Symptom: the transform reports the
+credential as missing while the client's settings field still looks populated. Re-importing after
+the seed URL changes — switching the server between HTTP and HTTPS does this — rewrites the
+transform definitions, and the previously stored global value no longer resolves against the new
+registration. Clear the field, apply, and re-enter the key.
+
+Be aware this trigger was inferred from the client's on-disk timestamps, not confirmed by
+capturing the client's request body; re-entering the key resolves several possible causes. If it
+recurs without a scheme change, capture the raw `POST /run` body and check what the
+`transformSettings` array actually contains.
+
+For local development, a transform can fall back to an environment variable when the client
+setting is empty, as `server/transforms/ransomwarelive/api.py` does:
+
+```python
+api_key = settings.get(API_KEY, "") or os.environ.get(API_KEY, "")
+```
+
+The server subprocess inherits the parent shell's environment (`lifecycle.build_server_env`), so a
+key exported once survives restarts and re-imports. The client setting still wins. This is a
+development convenience — it puts the key in the process environment, which is fine for a local
+server and not appropriate for a shared deployment.
 
 ## Security
 

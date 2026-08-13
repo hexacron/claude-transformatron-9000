@@ -17,6 +17,20 @@ server lifecycle and transform execution. It does not help you write transform c
 — code that looks right, runs green, and produces nothing. The vendored SDK guidance in
 `server/.agents/skills/` teaches one of them.
 
+Claude Code loads the same checklist automatically from
+`.claude/skills/maltego-transform-author/SKILL.md`. That file is a thin pointer to
+`docs/transform-authoring.md`, not a second copy, so nothing here is Claude-only. Working through
+this file instead gets you the same result.
+
+The short version, in the order these bite:
+
+1. Return a `list`, never a `MaltegoGraph` — a returned graph is silently discarded.
+2. Annotate both the first parameter and the return type; a bare `-> list` publishes output `NONE`.
+3. Import the module in `server/project.py`, or it never registers.
+4. Check the entity count. A success state is not proof of anything.
+5. Credentials belong in `TransformSetting(auth=True, is_global=True)`, never hardcoded.
+6. Validate `input_entity.value` before putting it in a URL or a subprocess call.
+
 ## The loop
 
 1. Add or edit a module under `server/transforms/`.
@@ -71,10 +85,17 @@ returning nothing. Always check the entity count.
 
 ```bash
 uv run python scripts/smoke_test_transforms.py
+uv run python scripts/smoke_test_transforms.py --setting API_KEY=xxx
 ```
 
 Runs every registered transform and fails on zero entities or an output type of `NONE`. Run it
 after any change under `server/transforms/`.
+
+Pass credentials with repeated `--setting KEY=VALUE`. A transform that reports a missing setting
+is recorded SKIP rather than FAIL, so an unconfigured key is never mistaken for broken code — but
+it also is not evidence the transform works. Supply the setting to actually exercise it. When the
+per-entity-type sample does not suit a transform, add a `TRANSFORM_SAMPLES` entry keyed by the
+transform id suffix.
 
 Project gates:
 
