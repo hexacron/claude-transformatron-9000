@@ -10,3 +10,12 @@ __pycache__/
 
 # macOS finder metadata
 .DS_Store
+
+# Credentials. API keys belong in the Maltego client's transform settings, or in a
+# local env file for headless testing — never in the repository.
+.env
+.env.*
+*.env
+!.env.example
+*.pem
+*.key
