@@ -84,7 +84,8 @@ ways that fail silently: the code looks right, the run reports success, and no e
 2. Import it in `server/project.py` (`from transforms.my_module import *`). **The server only
    discovers what `project.py` imports** — this is the most common reason a new transform never
    shows up.
-3. `server_restart` — this is the reload path.
+3. `server_restart` — this is the reload path. It keeps the scheme the server is already
+   running under, so an HTTPS server stays on HTTPS.
 4. `list_transforms` to confirm it registered, then `run_transform` to exercise it.
 
 ## Commands
@@ -96,7 +97,7 @@ Every operation is available as a CLI command and as an MCP tool. Both call the 
 |---|---|---|
 | Start the server | `start [--ssl]` | `server_start(ssl=False)` |
 | Stop it | `stop` | `server_stop()` |
-| Reload after a code change | `restart [--ssl]` | `server_restart(ssl=False)` |
+| Reload after a code change | `restart [--ssl\|--no-ssl]` | `server_restart()` |
 | Running, healthy, transform count | `status` | `server_status()` |
 | Recent log output | `logs [--lines N]` | `server_logs(lines=50)` |
 | Advertised transforms and their types | `list` | `list_transforms()` |
@@ -109,7 +110,7 @@ Every operation is available as a CLI command and as an MCP tool. Both call the 
 CLI commands are prefixed `uv run python scripts/transformatron_cli.py`:
 
 ```bash
-uv run python scripts/transformatron_cli.py restart --ssl
+uv run python scripts/transformatron_cli.py restart
 uv run python scripts/transformatron_cli.py list
 uv run python scripts/transformatron_cli.py run <id> maltego.IPv4Address 8.8.8.8
 ```

@@ -40,8 +40,11 @@ def stop(config: TransformatronConfig) -> str:
         return f"Failed to stop: {exc}"
 
 
-def restart(config: TransformatronConfig, ssl: bool = False) -> str:
-    """Restart the server, picking up edited transform modules."""
+def restart(config: TransformatronConfig, ssl: bool | None = None) -> str:
+    """Restart the server, picking up edited transform modules.
+
+    With ``ssl=None`` the running server's scheme is preserved.
+    """
     try:
         return lifecycle.restart(config, ssl=ssl).detail
     except lifecycle.ServerLifecycleError as exc:

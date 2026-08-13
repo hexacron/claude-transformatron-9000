@@ -269,10 +269,21 @@ def stop(config: TransformatronConfig) -> str:
     return f"Server did not exit within {SHUTDOWN_TIMEOUT:g}s and was killed (pid {pid})."
 
 
-def restart(config: TransformatronConfig, ssl: bool = False) -> ServerStatus:
+def restart(config: TransformatronConfig, ssl: bool | None = None) -> ServerStatus:
     """Stop the server if running, then start it again.
 
     This is the reload path after adding or editing a transform module.
+
+    Args:
+        ssl: Serve over HTTPS. When ``None`` the scheme the server is currently
+            running under is preserved. Restarting an HTTPS server onto HTTP
+            would break the Maltego desktop client, which rejects plain HTTP
+            client-side and leaves no trace in the server log.
+
+    Returns:
+        The status observed once the server is healthy.
     """
+    if ssl is None:
+        ssl = read_scheme(config) == "https"
     stop(config)
     return start(config, ssl=ssl)

@@ -157,6 +157,78 @@ def test_build_server_env_points_at_certs_when_present(config: TransformatronCon
     assert env["MALTEGO_SERVER_CERT_KEY"] == str(config.key_file)
 
 
+def _record_restart_scheme(
+    config: TransformatronConfig, monkeypatch: pytest.MonkeyPatch
+) -> list[bool]:
+    """Capture the ``ssl`` value ``restart`` hands to ``start``.
+
+    ``stop`` is left real so the test also covers it deleting the scheme file
+    before ``start`` would read it.
+    """
+    started: list[bool] = []
+
+    def fake_start(_config: TransformatronConfig, ssl: bool = False) -> lifecycle.ServerStatus:
+        started.append(ssl)
+        return lifecycle.ServerStatus(running=True, pid=1, healthy=True, detail="started")
+
+    monkeypatch.setattr(lifecycle, "start", fake_start)
+    return started
+
+
+def test_restart_preserves_a_running_https_server(
+    config: TransformatronConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reloading an HTTPS server must not drop it to HTTP.
+
+    The Maltego desktop client rejects plain HTTP client-side, so a silent
+    downgrade fails with an empty server log — the hardest failure to diagnose.
+    """
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    config.scheme_file.write_text("https")
+    started = _record_restart_scheme(config, monkeypatch)
+
+    lifecycle.restart(config)
+
+    assert started == [True]
+
+
+def test_restart_preserves_a_running_http_server(
+    config: TransformatronConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    config.scheme_file.write_text("http")
+    started = _record_restart_scheme(config, monkeypatch)
+
+    lifecycle.restart(config)
+
+    assert started == [False]
+
+
+def test_restart_honours_an_explicit_ssl_request(
+    config: TransformatronConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    config.scheme_file.write_text("http")
+    started = _record_restart_scheme(config, monkeypatch)
+
+    lifecycle.restart(config, ssl=True)
+
+    assert started == [True]
+
+
+def test_restart_honours_an_explicit_downgrade(
+    config: TransformatronConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--no-ssl`` is the deliberate way back to HTTP."""
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    config.scheme_file.write_text("https")
+    started = _record_restart_scheme(config, monkeypatch)
+
+    lifecycle.restart(config, ssl=False)
+
+    assert started == [False]
+
+
 def test_tail_log_explains_an_absent_log(config: TransformatronConfig) -> None:
     assert "not been started" in lifecycle.tail_log(config)
 

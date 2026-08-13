@@ -33,7 +33,7 @@ your tool supports.
 
 ```bash
 uv run python scripts/transformatron_cli.py status
-uv run python scripts/transformatron_cli.py restart --ssl
+uv run python scripts/transformatron_cli.py restart
 uv run python scripts/transformatron_cli.py list
 uv run python scripts/transformatron_cli.py run <id> maltego.IPv4Address 8.8.8.8
 uv run python scripts/transformatron_cli.py logs --lines 100

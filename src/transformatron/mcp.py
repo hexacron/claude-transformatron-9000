@@ -46,11 +46,13 @@ def server_stop() -> str:
 
 
 @server.tool()
-def server_restart(ssl: bool = False) -> str:
+def server_restart(ssl: bool | None = None) -> str:
     """Restart the server to pick up new or edited transform modules.
 
     Args:
-        ssl: Serve over HTTPS after restarting.
+        ssl: Serve over HTTPS after restarting. Left unset, the scheme the
+            server is already running under is preserved, so reloading an
+            HTTPS server keeps the Maltego desktop client working.
     """
     return operations.restart(CONFIG, ssl=ssl)
 

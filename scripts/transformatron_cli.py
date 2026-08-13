@@ -8,7 +8,7 @@ but does not speak MCP.
 Usage:
     uv run python scripts/transformatron_cli.py status
     uv run python scripts/transformatron_cli.py start --ssl
-    uv run python scripts/transformatron_cli.py restart --ssl
+    uv run python scripts/transformatron_cli.py restart
     uv run python scripts/transformatron_cli.py list
     uv run python scripts/transformatron_cli.py run <id> maltego.IPv4Address 8.8.8.8
     uv run python scripts/transformatron_cli.py logs --lines 100
@@ -59,7 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("stop", help="Stop the server")
 
     restart = sub.add_parser("restart", help="Restart to pick up edited transforms")
-    restart.add_argument("--ssl", action="store_true", help="Serve over HTTPS")
+    restart.add_argument(
+        "--ssl",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Serve over HTTPS (default: keep the scheme the server is running under)",
+    )
 
     sub.add_parser("status", help="Report running state, health, and transform count")
     sub.add_parser("list", help="List advertised transforms with input/output types")

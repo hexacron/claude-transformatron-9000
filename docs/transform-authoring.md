@@ -73,7 +73,7 @@ Steps 3–5 work two ways. With an agent that has the `transformatron` MCP serve
 `run_transform` tools. Otherwise use the CLI, which is what those tools call:
 
 ```bash
-uv run python scripts/transformatron_cli.py restart --ssl
+uv run python scripts/transformatron_cli.py restart
 uv run python scripts/transformatron_cli.py list
 uv run python scripts/transformatron_cli.py run <transform-id> maltego.IPv4Address 8.8.8.8
 ```
