@@ -234,8 +234,8 @@ Things that cost real debugging time, recorded so they cost you less:
   generated file.
 
 - **The scheme is runtime state,** recorded in `.transformatron/server.scheme`. `project.py`
-  hardcodes `http`, so that file is the only way the control plane knows to address an
-  `ssl=True` server over HTTPS.
+  defaults to `https`, but the lifecycle tools override the scheme per start, so that file is the
+  only way the control plane knows which scheme to address a running server over.
 
 ## Development
 

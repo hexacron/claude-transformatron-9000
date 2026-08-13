@@ -84,9 +84,10 @@ def read_pid(config: TransformatronConfig) -> int | None:
 def read_scheme(config: TransformatronConfig) -> str:
     """Return the scheme the running server was started with.
 
-    The scheme is runtime state: ``project.py`` hardcodes ``http``, but a server
-    started with ``ssl=True`` serves HTTPS instead. Probing the wrong scheme
-    makes a healthy server look unreachable, so it is recorded at startup.
+    The scheme is runtime state: ``project.py`` defaults to ``https``, but
+    :func:`build_server_env` overrides it per start, so a server may be serving
+    either scheme. Probing the wrong one makes a healthy server look
+    unreachable, so the scheme is recorded at startup.
     """
     if not config.scheme_file.exists():
         return config.scheme

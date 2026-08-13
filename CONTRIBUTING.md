@@ -96,9 +96,10 @@ Reasoning behind choices that look arbitrary but are not:
   kept reporting it alive. `_OWNED` tracks handles so liveness comes from `poll()`. Shutdown is now
   0.4s. Do not remove that dict without re-testing stop timing.
 
-- **The server scheme is recorded in `.transformatron/server.scheme`.** `project.py` hardcodes
-  `http`, but a server started with `ssl=True` serves HTTPS. Without the recorded scheme the health
-  probe polls the wrong one and a healthy server looks unreachable.
+- **The server scheme is recorded in `.transformatron/server.scheme`.** `project.py` defaults to
+  `https`, but the lifecycle tools override the scheme per start, so a server may be serving either.
+  Without the recorded scheme the health probe polls the wrong one and a healthy server looks
+  unreachable.
 
 - **`generate_certs` prints the trust command rather than running it.** Trusting a certificate
   changes system-wide trust, which is the user's decision to make.
