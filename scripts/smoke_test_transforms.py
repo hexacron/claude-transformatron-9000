@@ -74,11 +74,22 @@ TRANSFORM_SAMPLES = {
 
 # A transform reporting one of these is unconfigured, not broken. Matched
 # case-insensitively against the run's status messages.
-MISSING_SETTING_MARKERS = ("api key configured", "no api key", "missing setting")
+MISSING_SETTING_MARKERS = (
+    "api key configured",
+    "no api key",
+    "api token configured",
+    "missing setting",
+)
 
 # A transform reporting one of these ran correctly but had nothing to return for the
 # sample input. Distinct from a silent failure, which produces no message at all.
-NO_MATCH_MARKERS = ("no exact victim match", "no press coverage", "no leak site listing")
+NO_MATCH_MARKERS = (
+    "no exact victim match",
+    "no press coverage",
+    "no leak site listing",
+    # A private or reserved address has no public routing data to return.
+    "bogon",
+)
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 

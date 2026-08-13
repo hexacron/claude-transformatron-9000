@@ -8,6 +8,7 @@ from maltego.server import MaltegoServerSettings, ServerHTTPSettings, run_server
 # Sample transforms. Delete this import (and transforms/examples/) once you have
 # your own modules; the server only registers what this file imports.
 from transforms.examples.ffraud import *  # noqa: F401,F403
+from transforms.ipinfo.lookup import *  # noqa: F401,F403
 from transforms.ransomwarelive.groups import *  # noqa: F401,F403
 from transforms.ransomwarelive.intel import *  # noqa: F401,F403
 from transforms.ransomwarelive.victims import *  # noqa: F401,F403
