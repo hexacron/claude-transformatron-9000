@@ -4,12 +4,14 @@ An MCP control plane for a local [Maltego](https://www.maltego.com/) v3 transfor
 
 Maltego transforms are small functions that take one entity (an IP address, a domain, a person)
 and return related entities, building up a graph. The `maltego-transforms` SDK gives you a server
-to host them. This project gives an AI coding agent — or you, at a terminal — the ability to
-**start that server, reload it after an edit, and run a transform to see what it returns**,
-without leaving the editor.
+to host them. This project gives you — or a coding agent — the ability to **start that server,
+reload it after an edit, and run a transform to see what it returns**, without leaving the editor.
 
-It does not help you *write* transforms. The SDK already ships agent skills for that, and this
-project deliberately does not duplicate them. See [Division of labour](#division-of-labour).
+Everything works two ways: a **CLI** for humans and any agent that can run commands, and an **MCP
+server** for agents that speak it. Both call the same code, so they behave identically.
+
+It does not help you *write* transforms — the SDK ships guidance for that. But it does correct two
+SDK behaviours that fail silently; see [Writing transforms](#writing-transforms).
 
 > **Status:** early. Built and verified against a live server on macOS, but not yet exercised on
 > Linux or Windows, and not published to PyPI. Expect rough edges.
@@ -62,21 +64,19 @@ this problem, not a sign the server is broken.
 The server binds to `127.0.0.1` only. That is fine for a client on the same machine, but a client
 on another host will not reach it.
 
-## Division of labour
+## Writing transforms
 
-Two layers that do not overlap:
+**Start with [`docs/transform-authoring.md`](docs/transform-authoring.md).**
+
+The SDK ships its own authoring guidance in `server/.agents/skills/`, versioned with the package,
+and this project does not restate it — a copy would go stale. But two of its examples are wrong in
+ways that fail silently: the code looks right, the run reports success, and no entities come back.
+`docs/transform-authoring.md` corrects those, then routes to the SDK guidance for everything else.
 
 | Need | Use |
 |------|-----|
-| **Write or change transform code** | The official SDK agent skills in `server/.agents/skills/` |
-| **Run, reload, or inspect the server** | The `transformatron` MCP tools |
-
-To author a transform, load `server/.agents/skills/maltego-transform-skill-index/SKILL.md` first.
-It is a routing table pointing to one focused skill per task (`-build`, `-design`, `-test`,
-`-discover`, `-docs`, or the TRX migration pair). Load one at a time.
-
-These skills ship with `maltego-transforms` and are versioned with the SDK, which is exactly why
-this project does not restate their contents — a copy would go stale against the package.
+| **Write or change transform code** | `docs/transform-authoring.md`, then the SDK skills |
+| **Run, reload, or inspect the server** | The CLI or the MCP tools |
 
 ## The loop
 
@@ -87,36 +87,54 @@ this project does not restate their contents — a copy would go stale against t
 3. `server_restart` — this is the reload path.
 4. `list_transforms` to confirm it registered, then `run_transform` to exercise it.
 
-## MCP tools
+## Commands
 
-| Tool | Purpose |
-|------|---------|
-| `server_start(ssl=False)` | Start the server |
-| `server_stop()` | Stop it |
-| `server_restart(ssl=False)` | Reload after a code change |
-| `server_status()` | Running, healthy, transform count |
-| `server_logs(lines=50)` | First place to look when a transform fails to register |
-| `list_transforms()` | Every transform the server advertises, with input/output types |
-| `get_transform(id)` | Full detail document for one transform |
-| `list_entities()` | Entity types the server advertises |
-| `run_transform(...)` | Execute one transform against one input entity |
-| `get_seed_url()` | The URL to register in the Maltego client |
-| `generate_certs(force=False)` | Self-signed cert for HTTPS |
+Every operation is available as a CLI command and as an MCP tool. Both call the same
+`transformatron.operations` module, so output is identical.
 
-`run_transform` takes `(transform_id, entity_type, entity_value, settings=None, timeout=60)`.
+| Purpose | CLI | MCP tool |
+|---|---|---|
+| Start the server | `start [--ssl]` | `server_start(ssl=False)` |
+| Stop it | `stop` | `server_stop()` |
+| Reload after a code change | `restart [--ssl]` | `server_restart(ssl=False)` |
+| Running, healthy, transform count | `status` | `server_status()` |
+| Recent log output | `logs [--lines N]` | `server_logs(lines=50)` |
+| Advertised transforms and their types | `list` | `list_transforms()` |
+| Detail document for one transform | `show <id>` | `get_transform(id)` |
+| Advertised entity types | `entities` | `list_entities()` |
+| Run one transform | `run <id> <type> <value>` | `run_transform(...)` |
+| Seed URL and registration steps | `seed-url` | `get_seed_url()` |
+| Self-signed cert for HTTPS | `certs [--force]` | `generate_certs(force=False)` |
 
-## Using it with Claude Code
+CLI commands are prefixed `uv run python scripts/transformatron_cli.py`:
 
-The MCP server is registered at project scope in `.mcp.json`, so a fresh clone picks it up
-automatically. It requires a Claude Code session restart to load, and prompts once for
-project-scope approval.
+```bash
+uv run python scripts/transformatron_cli.py restart --ssl
+uv run python scripts/transformatron_cli.py list
+uv run python scripts/transformatron_cli.py run <id> maltego.IPv4Address 8.8.8.8
+```
 
-That approval is recorded in `.claude/settings.local.json`, which is per-machine and gitignored —
-so every fresh clone prompts again. This is expected, not a bug.
+Pass settings with repeated `--setting KEY=VALUE`. `--help` works on any subcommand.
 
-## Using it without an agent
+Adding an operation? Put it in `src/transformatron/operations.py` and both front ends get it.
 
-Nothing here is agent-only. The same operations work from Python:
+## Using it with a coding agent
+
+`AGENTS.md` is the entry point, following the [AGENTS.md](https://agents.md) convention that Codex,
+Gemini CLI, and others read directly. `CLAUDE.md` points at the same file so the guidance cannot
+drift.
+
+Any agent that can run shell commands can drive the server through the CLI — no MCP required.
+
+For **Claude Code**, the MCP server is registered at project scope in `.mcp.json`, so a fresh clone
+picks it up automatically. It needs a session restart to load and prompts once for approval. That
+approval is recorded in `.claude/settings.local.json`, which is per-machine and gitignored, so a
+fresh clone prompts again — expected, not a bug. If the tools are unavailable, the CLI does
+everything they do.
+
+## Using it from Python
+
+The same operations work directly:
 
 ```python
 import asyncio
@@ -168,15 +186,22 @@ directory and its import in `server/project.py`.
 
 ```
 src/transformatron/
+  operations.py  server operations shared by both front ends — add new ones here
   config.py      TransformatronConfig — host, port, scheme, derived URLs and state paths
   client.py      async v3 protocol client; the run→poll→flatten state machine
   lifecycle.py   start/stop/restart/status/logs over a detached subprocess
   certs.py       self-signed certificate generation
-  mcp.py         the 11 MCP tools
+  mcp.py         MCP front end
+scripts/
+  transformatron_cli.py     CLI front end
+  smoke_test_transforms.py  runs every transform, fails on zero entities
 server/          SDK-generated (`maltego-transforms start server --with-skills`).
                  Upstream-owned: excluded from ruff so regeneration does not churn.
   project.py     entrypoint; imports decide what gets registered
   transforms/    your transform modules go here
+docs/
+  transform-authoring.md   read before writing a transform
+  upstream-sdk-issue.md    draft bug report, not yet filed
 tests/           28 tests
 .transformatron/ runtime state — PID, log, certs, recorded scheme. Gitignored.
 ```
@@ -189,11 +214,15 @@ Things that cost real debugging time, recorded so they cost you less:
   means a missing or untyped annotation. Input type comes from the parameter annotation, output
   from the return annotation. A bare `-> list` advertises no output type and breaks client routing.
 
-- **Returning a `MaltegoGraph` from a plain `async` transform silently yields zero entities.** The
-  run still reports success. In the SDK's `__handle_async_result`, a returned graph fails both
-  `isinstance` branches and is dropped. Return a list instead — `-> list[AS | ISP]` still publishes
-  every output type to discovery. Note this contradicts the SDK's own `maltego-transform-build`
-  skill, whose `return graph` example only works for async *generators*.
+- **Returning a `MaltegoGraph` from an `async` transform silently yields zero entities.** The run
+  still reports success. In the SDK's `__handle_async_result`, a returned graph fails both
+  `isinstance` branches and is dropped; the generator branch skips graphs too, so this affects
+  every async path. Return a list — `-> list[AS | ISP]` still publishes every output type to
+  discovery. This contradicts the SDK's own shipped guidance, which teaches the broken pattern;
+  see `docs/transform-authoring.md` and the draft report in `docs/upstream-sdk-issue.md`.
+
+- **A success state is not proof a transform works.** Check the entity count, or run
+  `scripts/smoke_test_transforms.py`.
 
 - **The desktop client requires HTTPS** (see [above](#connecting-to-the-maltego-desktop-client)).
 
@@ -213,11 +242,25 @@ Things that cost real debugging time, recorded so they cost you less:
 ```bash
 uv run pytest -q
 uv run ruff check . && uv run ruff format --check .
-uv run ty check src tests
+uv run ty check src tests scripts
 ```
 
 `server/` is excluded from linting because it is SDK-generated and regenerating it would otherwise
 produce churn.
+
+### Smoke-testing transforms
+
+```bash
+uv run python scripts/smoke_test_transforms.py
+```
+
+Runs every registered transform against a sample input and **fails on zero entities** or an output
+type of `NONE` — the failure modes that otherwise report success. Exits non-zero, so it works as a
+gate. Run it after any change under `server/transforms/`.
+
+Transforms calling third-party APIs make live network requests, so a failure can mean an upstream
+outage rather than broken code; check the reported message. Override the input with `--value`, or
+check one transform with `--transform <id>`.
 
 ## Naming
 
