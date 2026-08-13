@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -54,9 +54,18 @@ class TransformatronConfig:
         """Path to the server's ``project.py``."""
         return self.project_dir / "project.py"
 
+    def with_scheme(self, scheme: str) -> TransformatronConfig:
+        """Return a copy of this config that addresses the server over ``scheme``."""
+        return replace(self, scheme=scheme)
+
     @property
     def pid_file(self) -> Path:
         return self.state_dir / "server.pid"
+
+    @property
+    def scheme_file(self) -> Path:
+        """Records the scheme the running server was started with."""
+        return self.state_dir / "server.scheme"
 
     @property
     def log_file(self) -> Path:

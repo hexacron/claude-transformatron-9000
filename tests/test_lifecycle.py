@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 
+import httpx
 import pytest
 
 from transformatron import lifecycle
@@ -100,6 +101,43 @@ def test_build_server_env_pins_host_port_and_scheme(config: TransformatronConfig
     assert env["MALTEGO_SERVER_HTTP_ADDR"] == config.host
     assert env["MALTEGO_SERVER_HTTP_PORT"] == str(config.port)
     assert env["MALTEGO_SERVER_PROTOCOL"] == "http"
+
+
+def test_read_scheme_defaults_to_http(config: TransformatronConfig) -> None:
+    assert lifecycle.read_scheme(config) == "http"
+
+
+def test_read_scheme_reports_recorded_https(config: TransformatronConfig) -> None:
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    config.scheme_file.write_text("https")
+
+    assert lifecycle.read_scheme(config) == "https"
+    assert lifecycle.resolve_config(config).base_url.startswith("https://")
+
+
+def test_read_scheme_ignores_junk(config: TransformatronConfig) -> None:
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    config.scheme_file.write_text("gopher")
+
+    assert lifecycle.read_scheme(config) == "http"
+
+
+def test_probe_health_uses_recorded_scheme(
+    config: TransformatronConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server started with ssl=True must be probed over https, not http."""
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    config.scheme_file.write_text("https")
+    probed: list[str] = []
+
+    def fake_get(url: str, **kwargs: object) -> httpx.Response:
+        probed.append(url)
+        return httpx.Response(200, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(lifecycle.httpx, "get", fake_get)
+
+    assert lifecycle.probe_health(config) is True
+    assert probed[0].startswith("https://")
 
 
 def test_build_server_env_requires_certs_for_ssl(config: TransformatronConfig) -> None:

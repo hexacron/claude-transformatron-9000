@@ -80,7 +80,7 @@ async def server_status() -> str:
     lines = [status.detail]
     if status.healthy:
         try:
-            transforms = await TransformClient(CONFIG).list_transforms()
+            transforms = await TransformClient(lifecycle.resolve_config(CONFIG)).list_transforms()
             lines.append(f"Serving {len(transforms)} transforms.")
             lines.append(f"Seed URL: {CONFIG.seed_url}")
         except TransformServerError as exc:
@@ -106,7 +106,7 @@ async def list_transforms() -> str:
     annotation, which stops the Maltego client from routing to it.
     """
     try:
-        transforms = await TransformClient(CONFIG).list_transforms()
+        transforms = await TransformClient(lifecycle.resolve_config(CONFIG)).list_transforms()
     except TransformServerError as exc:
         return str(exc)
     if not transforms:
@@ -123,7 +123,7 @@ async def get_transform(transform_id: str) -> str:
         transform_id: Fully qualified transform name from list_transforms.
     """
     try:
-        detail = await TransformClient(CONFIG).get_transform(transform_id)
+        detail = await TransformClient(lifecycle.resolve_config(CONFIG)).get_transform(transform_id)
     except TransformServerError as exc:
         return str(exc)
     return json.dumps(detail, indent=2)
@@ -133,7 +133,7 @@ async def get_transform(transform_id: str) -> str:
 async def list_entities() -> str:
     """List the entity types the running server advertises."""
     try:
-        entities = await TransformClient(CONFIG).list_entities()
+        entities = await TransformClient(lifecycle.resolve_config(CONFIG)).list_entities()
     except TransformServerError as exc:
         return str(exc)
     names = sorted(str(e.get("name") or e.get("id") or e) for e in entities)
@@ -158,7 +158,7 @@ async def run_transform(
         timeout: Seconds to wait before cancelling the run.
     """
     try:
-        result = await TransformClient(CONFIG).run_transform(
+        result = await TransformClient(lifecycle.resolve_config(CONFIG)).run_transform(
             transform_id, entity_type, entity_value, settings, timeout
         )
     except TransformServerError as exc:
@@ -180,7 +180,7 @@ async def run_transform(
 def get_seed_url() -> str:
     """Return the seed URL and the steps to register this server with Maltego."""
     return (
-        f"Seed URL: {CONFIG.seed_url}\n\n"
+        f"Seed URL: {lifecycle.resolve_config(CONFIG).seed_url}\n\n"
         "To register it in the Maltego client:\n"
         "1. Start the server (server_start) and confirm it is healthy.\n"
         "2. In Maltego, open the Transforms tab and choose Transform Hub.\n"

@@ -81,10 +81,29 @@ def read_pid(config: TransformatronConfig) -> int | None:
     return pid
 
 
+def read_scheme(config: TransformatronConfig) -> str:
+    """Return the scheme the running server was started with.
+
+    The scheme is runtime state: ``project.py`` hardcodes ``http``, but a server
+    started with ``ssl=True`` serves HTTPS instead. Probing the wrong scheme
+    makes a healthy server look unreachable, so it is recorded at startup.
+    """
+    if not config.scheme_file.exists():
+        return config.scheme
+    scheme = config.scheme_file.read_text().strip()
+    return scheme if scheme in ("http", "https") else config.scheme
+
+
+def resolve_config(config: TransformatronConfig) -> TransformatronConfig:
+    """Return ``config`` addressing the running server's actual scheme."""
+    return config.with_scheme(read_scheme(config))
+
+
 def probe_health(config: TransformatronConfig, timeout: float = 3.0) -> bool:
     """Return whether the server answers on its status endpoint."""
+    resolved = resolve_config(config)
     try:
-        response = httpx.get(f"{config.api_url}/status", timeout=timeout, verify=False)
+        response = httpx.get(f"{resolved.api_url}/status", timeout=timeout, verify=False)
     except httpx.HTTPError:
         return False
     return response.status_code < 500
@@ -100,6 +119,7 @@ def tail_log(config: TransformatronConfig, lines: int = 50) -> str:
 
 def status(config: TransformatronConfig) -> ServerStatus:
     """Report whether the server process is running and answering requests."""
+    resolved = resolve_config(config)
     pid = read_pid(config)
     if pid is None:
         healthy = probe_health(config)
@@ -109,16 +129,16 @@ def status(config: TransformatronConfig) -> ServerStatus:
                 pid=None,
                 healthy=True,
                 detail=(
-                    f"Something is already serving {config.base_url}, but it was not "
+                    f"Something is already serving {resolved.base_url}, but it was not "
                     "started by this tool, so it cannot be stopped here."
                 ),
             )
         return ServerStatus(False, None, False, "Server is not running.")
     healthy = probe_health(config)
     detail = (
-        f"Server is running (pid {pid}) and answering at {config.base_url}."
+        f"Server is running (pid {pid}) and answering at {resolved.base_url}."
         if healthy
-        else f"Process {pid} is alive but not answering yet at {config.base_url}."
+        else f"Process {pid} is alive but not answering yet at {resolved.base_url}."
     )
     return ServerStatus(True, pid, healthy, detail)
 
@@ -177,6 +197,7 @@ def start(config: TransformatronConfig, ssl: bool = False) -> ServerStatus:
         )
 
     config.state_dir.mkdir(parents=True, exist_ok=True)
+    config.scheme_file.write_text("https" if ssl else "http")
     log_handle = config.log_file.open("ab")
     try:
         process = subprocess.Popen(
@@ -207,17 +228,18 @@ def _await_healthy(config: TransformatronConfig, process: subprocess.Popen) -> S
                 f"Recent log output:\n{tail_log(config, 30)}"
             )
         if probe_health(config):
+            resolved = resolve_config(config)
             return ServerStatus(
                 running=True,
                 pid=process.pid,
                 healthy=True,
-                detail=f"Server started (pid {process.pid}) at {config.base_url}.",
+                detail=f"Server started (pid {process.pid}) at {resolved.base_url}.",
             )
         time.sleep(HEALTH_POLL_INTERVAL)
 
     raise ServerLifecycleError(
-        f"Server did not answer at {config.base_url} within {STARTUP_TIMEOUT:g}s. "
-        f"Recent log output:\n{tail_log(config, 30)}"
+        f"Server did not answer at {resolve_config(config).base_url} within "
+        f"{STARTUP_TIMEOUT:g}s. Recent log output:\n{tail_log(config, 30)}"
     )
 
 
@@ -232,6 +254,7 @@ def stop(config: TransformatronConfig) -> str:
     while time.monotonic() < deadline:
         if not _pid_is_alive(pid):
             config.pid_file.unlink(missing_ok=True)
+            config.scheme_file.unlink(missing_ok=True)
             _OWNED.pop(pid, None)
             return f"Server stopped (pid {pid})."
         time.sleep(HEALTH_POLL_INTERVAL)
@@ -241,6 +264,7 @@ def stop(config: TransformatronConfig) -> str:
     if owned is not None:
         owned.wait(timeout=SHUTDOWN_TIMEOUT)
     config.pid_file.unlink(missing_ok=True)
+    config.scheme_file.unlink(missing_ok=True)
     return f"Server did not exit within {SHUTDOWN_TIMEOUT:g}s and was killed (pid {pid})."
 
 
