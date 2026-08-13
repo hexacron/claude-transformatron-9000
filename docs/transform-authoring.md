@@ -36,6 +36,19 @@ so the first branch is skipped, and the `elif not isinstance(async_res, MaltegoG
 again. A returned graph falls through both and is dropped. The generator branch in
 `__add_async_results` skips graphs too, so this affects **every** async path.
 
+Only a **freshly constructed** graph loses entities. Adding to the context graph and returning it
+still publishes them, because they were registered on the context before the return value was
+discarded:
+
+```python
+# Entities survive — but only by accident; the return value is still dropped
+context.graph.add_entity(EmailAddress(value="admin@example.com"))
+return context.graph
+```
+
+That variant passes `scripts/smoke_test_transforms.py`, so a green smoke test does not prove a
+transform avoids this trap. Return a list and the question does not arise.
+
 **These SDK skill sections teach the broken pattern — do not follow them:**
 
 - `maltego-transform-basics/references/transform-authoring-patterns.md` §3 "Returning a Graph
