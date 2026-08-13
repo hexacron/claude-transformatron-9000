@@ -70,6 +70,17 @@ TRANSFORM_SAMPLES = {
     "group_to_ttps": "akira",
     # Matches group names as a substring, so the generic Phrase sample finds nothing.
     "list_groups": "lock",
+    # CrowdSec only holds attack data for addresses it has seen reported. The generic
+    # 8.8.8.8 sample is a resolver with an "unknown" reputation, so the behaviour and
+    # target-country transforms legitimately return nothing for it. This address was
+    # reported with several behaviours and a full target-country spread; if it ages
+    # out of the dataset these turn into no-match SKIPs, so re-pin it from a current
+    # CrowdSec listing rather than treating the skip as a defect.
+    "crowdsec_ip_reputation": "141.98.11.30",
+    "crowdsec_ip_to_behaviour": "141.98.11.30",
+    "crowdsec_ip_to_network": "141.98.11.30",
+    "crowdsec_ip_to_location": "141.98.11.30",
+    "crowdsec_ip_to_targets": "141.98.11.30",
 }
 
 # A transform reporting one of these is unconfigured, not broken. Matched
@@ -80,6 +91,12 @@ MISSING_SETTING_MARKERS = (
     "api token configured",
     "missing setting",
 )
+
+# A transform reporting one of these was throttled by the upstream API before it could
+# answer. The gate runs every transform back to back, which trips free-tier quotas that
+# ordinary interactive use never would, so this says nothing about the code. Reported
+# SKIP rather than FAIL: re-run the affected transform on its own to judge it.
+RATE_LIMIT_MARKERS = ("rate limited", "too many requests", "(429)")
 
 # A transform reporting one of these ran correctly but had nothing to return for the
 # sample input. Distinct from a silent failure, which produces no message at all.
@@ -177,6 +194,15 @@ async def check_transform(
                 transform_id,
                 SKIP,
                 f"needs a credential — pass it with --setting to exercise this ({messages})",
+            )
+        # Throttled before it could answer. Running every transform back to back trips
+        # free-tier quotas that interactive use never would, so this is a fact about
+        # the run, not the code.
+        if _matches(result.messages, RATE_LIMIT_MARKERS):
+            return Outcome(
+                transform_id,
+                SKIP,
+                f"upstream rate limit ({messages}) — re-run this transform on its own to judge it",
             )
         # The transform ran and said, explicitly, that this input has no results.
         # That is honest behaviour, not the silent empty return this gate hunts for.
