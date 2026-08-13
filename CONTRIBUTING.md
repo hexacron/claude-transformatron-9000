@@ -110,6 +110,19 @@ Reasoning behind choices that look arbitrary but are not:
   and fail on a directory named `${PWD}`. The flag is unnecessary — `uv run` walks up from the
   working directory to find the project root. Do not reintroduce it.
 
+- **A stale MCP process is documented, not detected in code.** The MCP server imports
+  `src/transformatron/` once at startup (`mcp.py` builds `CONFIG` at module scope), so edits to
+  this package do not reach the running tools. It cost two debugging sessions: a false "did not
+  answer" from `server_restart` after the fix had landed, and MCP tools probing `http://` against
+  an HTTPS server while `68ec099` was being written. Both times MCP and the CLI disagreed and the
+  CLI was right.
+
+  A runtime check is possible — the package is installed editable, so each loaded `transformatron`
+  module can be hashed on disk and compared against what was imported. It was deliberately not
+  built: that adds a check on every tool call to report something a reader can be told once. The
+  warning lives in `AGENTS.md` instead. If you later decide the check is worth it, that is the
+  mechanism.
+
 ## Testing
 
 Test behaviour and edges, not implementation. Mock only slow, non-deterministic, or external

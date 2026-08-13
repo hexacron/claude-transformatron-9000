@@ -48,6 +48,22 @@ uv run python scripts/transformatron_cli.py logs --lines 100
 Both produce identical output. If you add an operation, put it in
 `src/transformatron/operations.py` so both front ends get it.
 
+### The MCP tools can hold stale code
+
+The MCP server is one long-lived process. It imports `src/transformatron/` once at startup, so
+**editing that code does not change what the MCP tools run** — they keep executing the version
+loaded when the session began. The CLI is a fresh process each time and always runs current code.
+
+This applies only to edits under `src/transformatron/`. Editing `server/transforms/` is unaffected:
+`server_restart` restarts the transform server subprocess, which does reload your transform
+modules. You do not need to relaunch a session after changing a transform.
+
+`/clear` does not help — it resets the conversation but keeps the same process, so the MCP server
+keeps its loaded modules. Use `/exit` and relaunch.
+
+**If MCP and the CLI disagree about the server, suspect this first and trust the CLI.** That
+disagreement is the signature; the stale tools otherwise look like they are working.
+
 ## Verifying your work
 
 **A success state is not proof a transform works.** It can report `COMPLETED (success)` while

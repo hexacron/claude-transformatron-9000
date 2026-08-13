@@ -133,6 +133,11 @@ approval is recorded in `.claude/settings.local.json`, which is per-machine and 
 fresh clone prompts again — expected, not a bug. If the tools are unavailable, the CLI does
 everything they do.
 
+If you are modifying this project's own code under `src/transformatron/`, note that the MCP tools
+run the version loaded when the session started, so your edits will not show up there until you
+relaunch. The CLI always runs current code. `AGENTS.md` has the details — this does not affect
+editing transforms under `server/transforms/`.
+
 ## Using it from Python
 
 The same operations work directly:
