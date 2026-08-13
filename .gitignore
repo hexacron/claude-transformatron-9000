@@ -1,5 +1,7 @@
 .transformatron/
 .claude/settings.local.json
+# Local working notes. Durable documentation belongs in README/AGENTS/CONTRIBUTING.
+HANDOFF.md
 .venv/
 __pycache__/
 *.pyc
