@@ -27,7 +27,18 @@ nothing.
 5. **Credentials go in `TransformSetting(auth=True, is_global=True)`**, read at runtime via
    `settings.get(NAME, "")`. Never hardcode a key. Declare the setting name once as a module
    constant and use it on both sides — a literal mistyped on one side silently reads back as the
-   default.
+   default. Pass the list to `register_transform` as `settings=[...]` — **not**
+   `transform_settings=`, which raises at import and stops the server booting.
+
+   **Confirm the field actually reaches the client**, or a user cannot enter the credential at
+   all. Restart, then check discovery publishes a `transformSettings` array:
+
+   ```bash
+   curl -sk https://127.0.0.1:3000/api/v3/transforms | grep -o '"transformSettings":[^]]*]'
+   ```
+
+   A `null` here means Desktop renders no field. Restart before believing it — a stale server
+   serves the old registration and makes correct code look broken.
 6. **Validate `input_entity.value` before interpolating it** into a URL path, query parameter, or
    subprocess call. It is user-controlled.
 
