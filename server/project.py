@@ -3,6 +3,10 @@
 
 from maltego.server import MaltegoServerSettings, ServerHTTPSettings, run_server
 
+# Sample transforms. Delete this import (and transforms/examples/) once you have
+# your own modules; the server only registers what this file imports.
+from transforms.examples.ffraud import *  # noqa: F401,F403
+
 if __name__ == "__main__":
     settings = MaltegoServerSettings(
         server_name="New Maltego Integration",
