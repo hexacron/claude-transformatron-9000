@@ -189,6 +189,43 @@ key exported once survives restarts and re-imports. The client setting still win
 development convenience — it puts the key in the process environment, which is fine for a local
 server and not appropriate for a shared deployment.
 
+### Writing keys down: `.env`
+
+Exporting works but is easy to get wrong — an export does not survive between shells, and a key
+set after the server started never reaches it. Write the keys to `.env` at the repository root
+instead:
+
+```bash
+cp .env.example .env   # then fill in the keys you have
+```
+
+`build_server_env` merges that file into the server subprocess on every start, and
+`scripts/smoke_test_transforms.py` reads it too, so credential-gated transforms are exercised
+rather than reported SKIP. **Restart the server after editing it** — the environment is read once
+at start. An exported shell variable still overrides the file, and an explicit `--setting` still
+overrides both.
+
+`.env` is gitignored; `.env.example` is the committed template and must never hold a real key.
+
+**A wrong key can be worse than no key.** urlscan answers HTTP 400 for an `api-key` header it does
+not recognise, including on endpoints that work fine anonymously — so a placeholder left in `.env`
+breaks transforms that would otherwise pass. Leave a key blank rather than filling it with
+something fake.
+
+## Keeping an integration out of the repository
+
+Anything under `server/transforms/local/` is gitignored and discovered at server start by
+`_register_local_transforms` in `server/project.py`. Use it for integrations that should not be
+published; the committed packages alongside it are reference examples and stay imported by name.
+
+```
+server/transforms/local/<service>/{__init__,api,<transform>}.py
+```
+
+Discovery imports every module in each package except `api.py`, so no `project.py` edit is needed
+— which also means the usual "did you add the import?" failure does not apply there. A clone
+without the directory still boots, and only `local/__init__.py` is tracked.
+
 ## Security
 
 - Do not log entity values that may contain PII — `context.log.*` messages surface in the Maltego

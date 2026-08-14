@@ -11,6 +11,12 @@ __pycache__/
 # macOS finder metadata
 .DS_Store
 
+# Private integrations. Transforms under transforms/local/ are discovered at server
+# start (see project.py) but never committed — this is where work that should not be
+# published lives. The package marker is tracked so the directory always exists.
+server/transforms/local/*
+!server/transforms/local/__init__.py
+
 # Credentials. API keys belong in the Maltego client's transform settings, or in a
 # local env file for headless testing — never in the repository.
 .env
