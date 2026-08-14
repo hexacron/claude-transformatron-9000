@@ -186,6 +186,34 @@ async def test_events_are_not_double_counted_across_polls(
     assert [e["value"] for e in result.entities] == ["one", "two"]
 
 
+async def test_a_poll_with_no_new_events_does_not_rewind_the_pointer(
+    config: TransformatronConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow run that produces nothing between polls must not re-deliver what it already sent.
+
+    `seen` is an absolute offset and the fetch already pages to eventCount, so after a poll
+    that returns events the offset and the page length agree — that is why most scenarios
+    survive either `seen += len(events)` or `seen = len(events)`. They part company when a
+    poll returns *zero* new events, which is the ordinary case for a transform still working:
+    the overwriting form resets the pointer to 0 and the next poll re-reads the run from the
+    start, duplicating every entity collected so far.
+    """
+    batch = [entity_event(f"e{i}") for i in range(3)]
+    fake = FakeServer(
+        [
+            {"result": {"state": "RUNNING", "events": batch}},
+            # Still working, nothing new since the last poll.
+            {"result": {"state": "RUNNING", "events": batch}},
+            {"result": {"state": "COMPLETED", "events": batch}},
+        ]
+    )
+    patch_transport(monkeypatch, fake)
+
+    result = await TransformClient(config).run_transform("t", "maltego.Phrase", "x", timeout=5)
+
+    assert [e["value"] for e in result.entities] == ["e0", "e1", "e2"]
+
+
 async def test_entities_beyond_one_page_are_collected(
     config: TransformatronConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
