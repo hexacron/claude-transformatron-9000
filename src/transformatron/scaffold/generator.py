@@ -9,6 +9,7 @@ from pathlib import Path
 from transformatron.scaffold.schema import (
     ScaffoldServiceConfig,
     ScaffoldTransformConfig,
+    qualified_entity_type,
 )
 
 _VALIDATORS = {
@@ -60,11 +61,13 @@ def _get_validator(entity_type: str) -> tuple[str, str]:
 def _isort_key(name: str) -> tuple[int, str]:
     """Sort entity names the way ruff's isort rule orders a `from` import.
 
-    Ruff puts all-caps names (``AS``, ``CVE``, ``URL``) ahead of CamelCase ones rather
-    than sorting the list plainly, so generated imports have to match or every scaffold
-    lands an I001 violation on code the project lints.
+    Ruff puts fully-uppercase names (``AS``, ``CVE``, ``URL``) ahead of the rest, then
+    orders what remains case-insensitively — so ``Website`` precedes ``WHOISRecord`` and
+    ``BTCAddress`` precedes ``MacAddress``. Sorting the remainder by raw codepoint instead
+    puts every embedded acronym in the wrong place, and generated code that disagrees with
+    ruff lands an I001 violation on a file the author has not touched.
     """
-    return (0 if name.isupper() else 1, name)
+    return (0 if name.isupper() else 1, name.lower())
 
 
 def generate_api_module(config: ScaffoldServiceConfig) -> str:
@@ -102,6 +105,8 @@ def generate_api_module(config: ScaffoldServiceConfig) -> str:
     # A "query" scheme carries the key in the query string, not a header. It gets merged
     # into `params` inside the generated fetch() rather than emitted here, because the
     # caller owns that dict and the key has to survive params=None.
+    # Emitted as a whole line including its indent, so an unauthenticated service drops the
+    # line rather than leaving one holding only whitespace (W293) inside the client.get call.
     auth_header_expr = ""
     auth_query_code = ""
     if config.auth_key_name:
@@ -120,6 +125,8 @@ def generate_api_module(config: ScaffoldServiceConfig) -> str:
     setting_import_str = ""
     if config.auth_key_name:
         setting_import_str = "from maltego.server import TransformSetting\n"
+
+    auth_header_line = f"            {auth_header_expr},\n" if auth_header_expr else ""
 
     setting_code = ""
     if config.auth_key_name:
@@ -184,8 +191,7 @@ async def fetch(
         response = await client.get(
             f"{{BASE_URL}}{{path}}",
             context=context,
-            {auth_header_expr + "," if auth_header_expr else ""}
-            params=params,
+{auth_header_line}            params=params,
         )
     except MaltegoHTTPDataProviderNotFound:
         context.log.inform("{config.display_name} has no record for the requested input")
@@ -202,6 +208,28 @@ async def fetch(
 '''
 
 
+_LINE_LIMIT = 100
+
+
+def _camel(snake: str) -> str:
+    """Convert a snake_case transform id into a CamelCase name for a type alias."""
+    return "".join(part.title() for part in snake.split("_") if part)
+
+
+def _format_entity_import(names: list[str]) -> str:
+    """Render the `from maltego.entities import ...` body, wrapping when it would be long.
+
+    A response with many mapped fields pushes the single-line form past the project's
+    100-character limit (E501) and ruff's formatter then rewrites it, failing
+    `ruff format --check` on freshly generated code.
+    """
+    single_line = ", ".join(names)
+    if len(f"from maltego.entities import {single_line}") <= _LINE_LIMIT:
+        return single_line
+    joined = "".join(f"    {name},\n" for name in names)
+    return f"(\n{joined})"
+
+
 def generate_transform_module(
     config: ScaffoldServiceConfig,
     transform: ScaffoldTransformConfig,
@@ -210,10 +238,43 @@ def generate_transform_module(
     val_func, _ = _get_validator(transform.input_entity)
 
     needed_entities = {transform.input_entity} | set(transform.output_entity_types)
-    entities_import_str = ", ".join(sorted(needed_entities, key=_isort_key))
+    entities_import_str = _format_entity_import(sorted(needed_entities, key=_isort_key))
     union_return_str = " | ".join(sorted(set(transform.output_entity_types), key=_isort_key))
 
+    # A transform emitting many entity types produces a union too long to inline at both
+    # the return annotation and the results declaration (E501). Naming it once keeps both
+    # sites short whatever the width, and reads better than a wrapped union.
+    # Three widths, matching what ruff's formatter would settle on: the bare assignment if
+    # it fits, else the body on its own indented line inside parens if *that* fits, else one
+    # operand per line. Wrapping earlier than ruff would is not harmless — the formatter
+    # collapses it again and `ruff format --check` fails on freshly generated code.
+    output_types = sorted(set(transform.output_entity_types), key=_isort_key)
+    alias_name = f"{_camel(transform.transform_id)}Output"
+    alias_body = " | ".join(output_types)
+    if len(f"{alias_name} = {alias_body}") <= _LINE_LIMIT:
+        alias_decl = f"{alias_name} = {alias_body}\n\n\n"
+    elif len(f"    {alias_body}") <= _LINE_LIMIT:
+        alias_decl = f"{alias_name} = (\n    {alias_body}\n)\n\n\n"
+    else:
+        wrapped = "\n    | ".join(output_types)
+        alias_decl = f"{alias_name} = (\n    {wrapped}\n)\n\n\n"
+    union_return_str = alias_name
+
     settings_arg = "[api_key_setting()]" if config.auth_key_name else "[]"
+
+    # Without an input constraint the Maltego client offers the transform on every entity
+    # of its input type. Constraining to the inferred type keeps it off entities it cannot
+    # serve. EntityTypeConstraint matches parent types too (it checks base_entity_types),
+    # so this does not over-narrow subclasses of the declared input.
+    #
+    # The import is emitted only on this branch: an unused one is an F401 failure on
+    # freshly generated code, which server/transforms/ is linted for.
+    constraint_arg = ""
+    constraint_import_str = ""
+    if transform.emit_input_constraint:
+        qualified = qualified_entity_type(transform.input_entity)
+        constraint_arg = f'\n    input_constraint=EntityTypeConstraint(entity_type="{qualified}"),'
+        constraint_import_str = "from maltego.model.input_constraints import EntityTypeConstraint\n"
 
     # MAX_ITEMS only appears in the generated body when a list mapping caps its slice,
     # and ruff's isort rule (I001) wants this list sorted. Both are F401/I001 failures
@@ -267,14 +328,13 @@ from typing import Any
 
 from maltego.entities import {entities_import_str}
 from maltego.model.context import MaltegoContext
-from maltego.server import register_transform
+{constraint_import_str}from maltego.server import register_transform
 from transforms.{config.service_id}.api import {api_imports_str}
 
-
-@register_transform(
+{alias_decl}@register_transform(
     display_name="{transform.display_name}",
     transform_set=TRANSFORM_SET,
-    settings={settings_arg},
+    settings={settings_arg},{constraint_arg}
 )
 async def {transform.transform_id}(
     input_entity: {transform.input_entity}, settings: dict[str, Any], context: MaltegoContext

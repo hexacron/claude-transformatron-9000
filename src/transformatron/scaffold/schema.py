@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from maltego import entities
+
 
 @dataclass
 class OutputFieldMapping:
@@ -30,6 +32,7 @@ class ScaffoldTransformConfig:
     http_method: str = "GET"
     output_mappings: list[OutputFieldMapping] = field(default_factory=list)
     description: str = ""
+    emit_input_constraint: bool = True
 
     @property
     def output_entity_types(self) -> list[str]:
@@ -53,6 +56,37 @@ class ScaffoldServiceConfig:
     auth_query_param: str | None = None
     auth_type: str = "header"  # "header", "bearer", "query", "none"
     transforms: list[ScaffoldTransformConfig] = field(default_factory=list)
+
+
+def qualified_entity_type(entity_class_name: str) -> str:
+    """Return the Maltego ``TYPE_NAME`` for a std-entities class name.
+
+    Read off the class rather than rebuilt as ``"maltego." + ClassName``: that rule holds
+    for most entities but breaks for 72 of the 244 the package exports. Every
+    ``Affiliation*`` class maps to ``maltego.affiliation.<Name>``, every ``STIX2*`` class to
+    a hyphenated ``maltego.STIX2.<name>`` (``STIX2attackpattern`` →
+    ``maltego.STIX2.attack-pattern``), and ``Hashtag`` to a lowercase ``maltego.hashtag``.
+    Reconstructing the string emits a constraint naming an entity type that does not exist,
+    which the client silently fails to route on.
+
+    Args:
+        entity_class_name: Bare class name, e.g. ``"Domain"``.
+
+    Returns:
+        The qualified type name, e.g. ``"maltego.Domain"``.
+
+    Raises:
+        ValueError: If no such entity class is exported by ``maltego.entities``.
+    """
+    entity_class = getattr(entities, entity_class_name, None)
+    type_name = getattr(entity_class, "TYPE_NAME", None)
+    if not isinstance(type_name, str):
+        raise ValueError(
+            f"'{entity_class_name}' is not an entity class exported by maltego.entities. "
+            f"Check the name against `python -c 'import maltego.entities; "
+            f"print(dir(maltego.entities))'`."
+        )
+    return type_name
 
 
 # Input entity heuristic patterns
@@ -111,6 +145,27 @@ _ATTACK_RE = re.compile(
     r"^(behavior|behaviors|technique|attack_pattern|mitre|threat|tactic)$", re.I
 )
 
+# Widened coverage, following the entity table in the SDK's own
+# maltego-transform-design/references/standard-entity-selection.md. Anything not matched
+# here becomes a Phrase, which renders as text an investigator cannot pivot from — so a
+# mapped entity is worth having wherever the field name is unambiguous.
+#
+# `org`/`organization` deliberately stay with _ISP_RE above: on the netblock and IP-lookup
+# APIs this scaffolder targets, that field is the network operator, not a company.
+_PERSON_RE = re.compile(r"^(person|name|full_name|owner|author|contact|registrant)$", re.I)
+_COMPANY_RE = re.compile(r"^(company|company_name|employer|vendor|manufacturer)$", re.I)
+_PHONE_RE = re.compile(r"^(phone|phone_number|tel|telephone|mobile|fax)$", re.I)
+_ALIAS_RE = re.compile(r"^(alias|username|user_name|handle|screen_name|nick|nickname|login)$", re.I)
+_IMAGE_RE = re.compile(r"^(image|image_url|avatar|photo|thumbnail|screenshot|logo)$", re.I)
+_MAC_RE = re.compile(r"^(mac|mac_address|macaddr|hardware_address)$", re.I)
+_PORT_RE = re.compile(r"^(port|ports|open_ports|dest_port|src_port)$", re.I)
+_BTC_RE = re.compile(r"^(bitcoin|bitcoin_address|btc|btc_address)$", re.I)
+_CRYPTO_RE = re.compile(r"^(wallet|wallet_address|crypto_address|cryptocurrency_address)$", re.I)
+_WEBSITE_RE = re.compile(r"^(website|site|web_site|homepage)$", re.I)
+_MALWARE_RE = re.compile(r"^(malware|malware_name|family|malware_family|trojan)$", re.I)
+_CERT_RE = re.compile(r"^(certificate|cert|ssl_cert|x509|tls_cert)$", re.I)
+_WHOIS_RE = re.compile(r"^(whois|whois_record|whois_data)$", re.I)
+
 
 def infer_output_entity(field_name: str, sample_val: Any = None) -> OutputFieldMapping:
     """Infer output entity mapping from a response key and sample value."""
@@ -147,6 +202,34 @@ def infer_output_entity(field_name: str, sample_val: Any = None) -> OutputFieldM
         return OutputFieldMapping(field_name=key, entity_type="Hash", is_list=is_list)
     if _IP_PARAM_RE.match(key):
         return OutputFieldMapping(field_name=key, entity_type="IPv4Address", is_list=is_list)
+    if _PERSON_RE.match(key):
+        return OutputFieldMapping(field_name=key, entity_type="Person", is_list=is_list)
+    if _COMPANY_RE.match(key):
+        return OutputFieldMapping(field_name=key, entity_type="Company", is_list=is_list)
+    if _PHONE_RE.match(key):
+        return OutputFieldMapping(field_name=key, entity_type="PhoneNumber", is_list=is_list)
+    if _ALIAS_RE.match(key):
+        return OutputFieldMapping(field_name=key, entity_type="Alias", is_list=is_list)
+    if _IMAGE_RE.match(key):
+        return OutputFieldMapping(field_name=key, entity_type="Image", is_list=is_list)
+    if _MAC_RE.match(key):
+        return OutputFieldMapping(field_name=key, entity_type="MacAddress", is_list=is_list)
+    if _PORT_RE.match(key):
+        return OutputFieldMapping(field_name=key, entity_type="Port", is_list=is_list)
+    if _BTC_RE.match(key):
+        return OutputFieldMapping(field_name=key, entity_type="BTCAddress", is_list=is_list)
+    if _CRYPTO_RE.match(key):
+        return OutputFieldMapping(
+            field_name=key, entity_type="CryptocurrencyAddress", is_list=is_list
+        )
+    if _WEBSITE_RE.match(key):
+        return OutputFieldMapping(field_name=key, entity_type="Website", is_list=is_list)
+    if _MALWARE_RE.match(key):
+        return OutputFieldMapping(field_name=key, entity_type="Malware", is_list=is_list)
+    if _CERT_RE.match(key):
+        return OutputFieldMapping(field_name=key, entity_type="X509Certificate", is_list=is_list)
+    if _WHOIS_RE.match(key):
+        return OutputFieldMapping(field_name=key, entity_type="WHOISRecord", is_list=is_list)
 
     # Format human-readable title for Phrase
     title = key.replace("_", " ").title()
