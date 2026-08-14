@@ -90,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     scaffold = sub.add_parser("scaffold", help="Scaffold a new transform from cURL or OpenAPI")
     scaffold.add_argument("--service", help="Service name slug (e.g. greynoise)")
     scaffold.add_argument("--curl", help="cURL command string")
-    scaffold.add_argument("--openapi", help="OpenAPI/Swagger JSON/YAML spec file or URL")
+    scaffold.add_argument("--openapi", help="OpenAPI/Swagger JSON spec: a file path or the JSON")
     scaffold.add_argument("--sample-response", help="Sample JSON response string")
 
     return parser

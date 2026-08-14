@@ -1,17 +1,19 @@
 # transformatron
 
-An MCP control plane for a local [Maltego](https://www.maltego.com/) v3 transform server.
+Build [Maltego](https://www.maltego.com/) transforms with a coding agent, against a real server.
 
 Maltego transforms are small functions that take one entity (an IP address, a domain, a person)
-and return related entities, building up a graph. The `maltego-transforms` SDK gives you a server
-to host them. This project gives you — or a coding agent — the ability to **start that server,
-reload it after an edit, and run a transform to see what it returns**, without leaving the editor.
+and return related entities, building up a graph. This project gives an agent the two halves it
+needs to build them: a **local transform server it can drive** — start, reload after an edit, run
+a transform and read back what it returned — and the **authoring guidance and scaffolding** to
+write the transform in the first place.
 
-Everything works two ways: a **CLI** for humans and any agent that can run commands, and an **MCP
-server** for agents that speak it. Both call the same code, so they behave identically.
+That combination is the point. An agent that can only write code guesses at what the API returns;
+an agent that can only run a server has nothing to run. Together they close the loop: scaffold from
+a spec, restart, run it, see the entities, fix what the spec got wrong.
 
-It does not help you *write* transforms — the SDK ships guidance for that. But it does correct two
-SDK behaviours that fail silently; see [Writing transforms](#writing-transforms).
+Everything works two ways: an **MCP server** for agents that speak it, and a **CLI** for humans and
+any agent that can run commands. Both call the same code, so they behave identically.
 
 > **Status:** early. Built and verified against a live server on macOS, but not yet exercised on
 > Linux or Windows, and not published to PyPI. Expect rough edges.
@@ -33,9 +35,9 @@ uv sync
 uv run pytest -q
 ```
 
-That verifies the control plane. To drive it from an agent, see [Using it with Claude
-Code](#using-it-with-claude-code); to drive it yourself, see [Using it without an
-agent](#using-it-without-an-agent).
+That verifies the control plane. Then go to [Build your first
+transform](#build-your-first-transform) — with an agent or by hand — and, if you have API keys to
+test against, [Credentials](#credentials).
 
 ### Connecting to the Maltego desktop client
 
@@ -66,17 +68,39 @@ on another host will not reach it.
 
 ## Build your first transform
 
-Assumes `uv sync` has run. This is the whole loop, start to finish:
+Assumes `uv sync` has run.
+
+### With an agent
+
+Start the server once, then describe what you want:
 
 ```bash
-# 1. Certificates, once — the desktop client refuses plain HTTP.
-uv run python scripts/transformatron_cli.py certs
-
-# 2. Start the server.
-uv run python scripts/transformatron_cli.py start --ssl
+uv run python scripts/transformatron_cli.py start
 ```
 
-Write a module under `server/transforms/`:
+> Scaffold a transform for the ipinfo.io API from this cURL command, then run it and
+> show me the entities it returns:
+> `curl -H "Authorization: Bearer $TOKEN" https://ipinfo.io/8.8.8.8/json`
+
+The agent scaffolds the module, wires the import into `server/project.py`, restarts, runs the
+transform and reads the entity count back. When the upstream response does not match what the spec
+implied, it sees that in the output and corrects the mapping. That last part is why the server
+matters — a scaffold is a starting point, and only a live run shows what the API actually returns.
+
+Claude Code picks up `.claude/skills/maltego-transform-author/` from the clone; other agents read
+[`AGENTS.md`](AGENTS.md). Both route to `docs/transform-authoring.md` rather than restating it, and
+both carry the corrections in [Writing transforms](#writing-transforms).
+
+### By hand
+
+The same loop, driven yourself. Scaffold from a spec:
+
+```bash
+uv run python scripts/transformatron_cli.py scaffold --service ipinfo \
+  --curl 'curl -H "Authorization: Bearer TOKEN" https://ipinfo.io/8.8.8.8/json'
+```
+
+Or write a module under `server/transforms/` directly — this is the minimal shape:
 
 ```python
 # server/transforms/hello.py
@@ -94,7 +118,8 @@ async def ip_to_domain(input_entity: IPv4Address, context: MaltegoContext) -> li
 Both annotations matter: `IPv4Address` declares the input type, `list[Domain]` the output. A bare
 `-> list` registers the transform with output `NONE` and the client cannot route it.
 
-Register it in `server/project.py`, next to the existing transform imports:
+A hand-written module needs its import in `server/project.py`, next to the existing ones
+(`scaffold` does this for you):
 
 ```python
 from transforms.hello import *  # noqa: F401,F403
@@ -106,24 +131,45 @@ where it still runs but registers nothing you can see. A transform that never ap
 almost always this.
 
 ```bash
-# 4. Reload and confirm.
+# Reload and confirm.
 uv run python scripts/transformatron_cli.py restart
 uv run python scripts/transformatron_cli.py list
 
-# 5. Run it, and check the entity count — not just the success state.
+# Run it, and check the entity count — not just the success state.
 uv run python scripts/transformatron_cli.py run \
   acme.new_maltego_integration.ip_to_domain maltego.IPv4Address 8.8.8.8
 
-# 6. Gate the whole set.
+# Gate the whole set.
 uv run python scripts/smoke_test_transforms.py
 ```
 
 Then [connect the desktop client](#connecting-to-the-maltego-desktop-client) and run it on a real
 graph.
 
-Coding agents get this same loop automatically: Claude Code from
-`.claude/skills/maltego-transform-author/`, other agents from
-[`AGENTS.md`](AGENTS.md). Both point at `docs/transform-authoring.md` rather than restating it.
+## Scaffolding from a spec
+
+`scaffold` turns a cURL command or an OpenAPI document into a working module package: an `api.py`
+client with the auth and validation wired up, one module per transform, and the import added to
+`server/project.py`.
+
+```bash
+# From a cURL command, with a sample response to infer output entities from.
+uv run python scripts/transformatron_cli.py scaffold --service demo \
+  --curl 'curl -H "X-API-KEY: k" https://api.demo.com/v1/ip/8.8.8.8'
+
+# From an OpenAPI spec — a path or the document itself.
+uv run python scripts/transformatron_cli.py scaffold --service demo --openapi ./demo-openapi.json
+```
+
+It infers input and output entity types from parameter names and the sample response, picks the
+right validator for the input type, and handles keys sent as a header, a bearer token, or a query
+parameter.
+
+**Treat the result as a first draft.** The generator works from the spec, and specs routinely
+disagree with the live API about which fields are present, what a 404 means, and how errors are
+shaped. Run the transform, read the entities, and correct the mapping — the loop above exists for
+exactly this. An existing service is never overwritten: scaffolding onto one raises rather than
+replacing hand-written code that has already absorbed those corrections.
 
 ## Writing transforms
 
@@ -136,6 +182,7 @@ ways that fail silently: the code looks right, the run reports success, and no e
 
 | Need | Use |
 |------|-----|
+| **Generate a starting point from an API spec** | `scaffold`, then correct it against a live run |
 | **Write or change transform code** | `docs/transform-authoring.md`, then the SDK skills |
 | **Run, reload, or inspect the server** | The CLI or the MCP tools |
 
@@ -181,11 +228,54 @@ Pass settings with repeated `--setting KEY=VALUE`. `--help` works on any subcomm
 
 Adding an operation? Put it in `src/transformatron/operations.py` and both front ends get it.
 
+## Credentials
+
+In real use, an API key belongs in the Maltego client's transform settings — declared with
+`TransformSetting(auth=True, is_global=True)`, entered once, reused by every transform in the set.
+Nothing needs configuring on the server for that path to work.
+
+For headless runs there is no client to enter it into, so transforms fall back to the process
+environment. Copy the template and fill in what you have:
+
+```bash
+cp .env.example .env
+```
+
+`.env` is read when the server starts and merged into its environment, so a key written once
+survives restarts. The smoke test reads it too, which is the difference between a credential-gated
+transform being exercised and being reported SKIP. An exported shell variable beats the file, and
+an explicit `--setting` beats both.
+
+`.env` is gitignored. `.env.example` is the committed template and holds no values. This is a
+development convenience: it puts keys in the server process's environment, visible to anyone who
+can read `ps`. Restart after editing it — the environment is read once, at start.
+
+## Transforms you do not want to publish
+
+Anything under `server/transforms/local/` is gitignored and discovered automatically when the
+server starts. Use it for integrations that should not be committed — an internal API, a
+client-specific lookup, work in progress.
+
+It is discovered rather than imported by name, because a fresh clone does not have the directory
+and a static import of a missing module stops the server booting. The committed examples alongside
+it keep their explicit imports in `project.py`.
+
 ## Using it with a coding agent
 
-`AGENTS.md` is the entry point, following the [AGENTS.md](https://agents.md) convention that Codex,
-Gemini CLI, and others read directly. `CLAUDE.md` points at the same file so the guidance cannot
-drift.
+An agent working in this repository can scaffold a transform from an API spec, restart the server
+to load it, run it against a real input, read back the entities it produced, and gate the whole set
+with the smoke test. That is the loop — and because every step reports what actually happened, the
+agent can tell a working transform from one that reports success and returns nothing.
+
+What it reads:
+
+| Agent | Entry point |
+|---|---|
+| **Claude Code** | `.claude/skills/maltego-transform-author/`, which ships with the clone |
+| **Codex, Gemini CLI, others** | [`AGENTS.md`](AGENTS.md), per the [AGENTS.md](https://agents.md) convention |
+
+`CLAUDE.md` points at `AGENTS.md` so the two cannot drift. Both route to
+`docs/transform-authoring.md` for the SDK corrections.
 
 Any agent that can run shell commands can drive the server through the CLI — no MCP required.
 
@@ -227,13 +317,16 @@ Run it with `uv run python your_script.py`.
 
 ## The sample transforms
 
-Two worked examples ship with the project. Both are **illustrative samples, not maintained
+Several worked examples ship with the project. All are **illustrative samples, not maintained
 integrations** — delete whichever you do not need, along with its import in `server/project.py`.
 
-| Example | Shows |
-|---|---|
-| `server/transforms/examples/ffraud.py` | Single module, no API key — the minimal shape |
-| `server/transforms/ransomwarelive/` | Multi-module, API key, shared client layer |
+| Example | Shows | Key |
+|---|---|---|
+| `server/transforms/examples/ffraud.py` | Single module, no API key — the minimal shape | no |
+| `server/transforms/ransomwarelive/` | Multi-module, shared client, upstream field drift | yes |
+| `server/transforms/greynoise/` | 404 as a verdict, silent key acceptance, tight quota | yes |
+| `server/transforms/ipinfo/` | Bearer auth, one response fanned out to several entities | yes |
+| `server/transforms/crowdsec/` | Minimal authenticated lookup | yes |
 
 Start from `ffraud.py` if you are learning the shape. Start from `ransomwarelive/` if your API
 needs a key — it is documented in [`docs/ransomware-live.md`](docs/ransomware-live.md) and shows
@@ -241,6 +334,12 @@ the parts the simple example cannot: declaring one credential across a whole tra
 keeping validation and error handling in a shared `api.py`, capping result sizes so a large
 upstream response does not flood the graph, and normalising a schema whose field names differ
 between endpoints. It needs a [ransomware.live](https://www.ransomware.live/) API key to run.
+
+`greynoise/` is worth reading for what a spec cannot tell you: an unrecognised key is accepted
+silently, so a successful lookup is not evidence the key is valid; HTTP 404 is a real verdict
+("never observed scanning") rather than a failure; and the free tier allows roughly 25 lookups a
+week, which the smoke test can spend in one pass. Every one of those was found by running it, not
+by reading the documentation.
 
 ### ffraud
 
@@ -274,6 +373,8 @@ src/transformatron/
   client.py      async v3 protocol client; the run→poll→flatten state machine
   lifecycle.py   start/stop/restart/status/logs over a detached subprocess
   certs.py       self-signed certificate generation
+  envfile.py     reads .env so headless runs can reach credentials
+  scaffold/      spec → module package: parser.py, generator.py, schema.py
   mcp.py         MCP front end
 scripts/
   transformatron_cli.py     CLI front end
@@ -283,13 +384,16 @@ server/          SDK-generated (`maltego-transforms start server --with-skills`)
                  excluded from ruff so regeneration does not churn.
   project.py     entrypoint; imports decide what gets registered
   transforms/    your transform modules go here — linted like the rest of the project
+    local/       gitignored; discovered at startup, for integrations you do not publish
 .claude/skills/
   maltego-transform-author/  authoring checklist; points at docs/, not a second copy
 docs/
   transform-authoring.md   read before writing a transform
   ransomware-live.md       the authenticated worked example
+  ipinfo.md                bearer auth, one response to several entities
   upstream-sdk-issue.md    draft bug report, not yet filed
-tests/           37 tests
+tests/           unit tests for the control plane and the scaffolder
+.env             API keys for headless runs. Gitignored; .env.example is the template.
 .transformatron/ runtime state — PID, log, certs, recorded scheme. Gitignored.
 ```
 
@@ -319,6 +423,11 @@ Things that cost real debugging time, recorded so they cost you less:
   [`docs/transform-authoring.md`](docs/transform-authoring.md) for the environment-variable
   fallback that avoids this during development.
 
+- **A successful lookup is not proof the API key is valid.** Some upstreams accept an unrecognised
+  key and answer normally — GreyNoise does — so there is no auth-failure path to catch and no
+  signal that the key is wrong until a quota or a permission boundary exposes it. Verify a key
+  against something that requires it, not against a call that happens to succeed.
+
 - **The desktop client requires HTTPS** (see [above](#connecting-to-the-maltego-desktop-client)).
 
 - **The server runs on port 3000.** The SDK's own skill scripts default to 8080 — pass
@@ -340,8 +449,9 @@ uv run ruff check . && uv run ruff format --check .
 uv run ty check src tests scripts
 ```
 
-`server/` is excluded from linting because it is SDK-generated and regenerating it would otherwise
-produce churn.
+`server/.agents/` and `server/project.py` are excluded from linting: the SDK owns them, and
+regenerating would churn against upstream. `server/transforms/` is your code and is linted like the
+rest of the project — including anything `scaffold` generates.
 
 ### Smoke-testing transforms
 
@@ -354,11 +464,12 @@ Runs every registered transform against a sample input and **fails on zero entit
 type of `NONE` — the failure modes that otherwise report success. Exits non-zero, so it works as a
 gate. Run it after any change under `server/transforms/`.
 
-Transforms needing credentials take them through repeated `--setting KEY=VALUE`. Two outcomes
-report SKIP rather than FAIL — a missing credential, and an input the upstream has no match for —
-so an unconfigured key is never mistaken for broken code. A SKIP is not evidence a transform
-works; it means the gate could not judge it. Add a `TRANSFORM_SAMPLES` entry when the
-per-entity-type sample does not suit a transform.
+Transforms needing credentials take them through repeated `--setting KEY=VALUE`, or from `.env`
+(see [Credentials](#credentials)). Four outcomes report SKIP rather than FAIL — a missing
+credential, an upstream rate limit, a sample input the transform's own validation rejects, and an
+input the upstream has no match for — so neither an unconfigured key nor a spent quota is mistaken
+for broken code. A SKIP is not evidence a transform works; it means the gate could not judge it.
+Add a `TRANSFORM_SAMPLES` entry when the per-entity-type sample does not suit a transform.
 
 Transforms calling third-party APIs make live network requests, so a failure can mean an upstream
 outage rather than broken code; check the reported message. Override the input with `--value`, or
