@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import httpx
 
 from transformatron.config import TransformatronConfig
+from transformatron.envfile import load_env_file
 
 STARTUP_TIMEOUT = 45.0
 SHUTDOWN_TIMEOUT = 10.0
@@ -153,10 +154,15 @@ def build_server_env(config: TransformatronConfig, ssl: bool = False) -> dict[st
     passed in code, so the environment is the only way to steer the server
     without editing the user's project file.
 
+    API keys in ``.env`` at the repository root are merged in so transforms can read
+    them through their environment fallback. An exported variable wins over the file, so
+    a one-off ``KEY=value`` on the command line still overrides what is written down.
+
     Raises:
         ServerLifecycleError: If HTTPS is requested but certificates are missing.
     """
-    env = dict(os.environ)
+    env = dict(load_env_file(config.env_file))
+    env.update(os.environ)
     env["MALTEGO_SERVER_HTTP_ADDR"] = config.host
     env["MALTEGO_SERVER_HTTP_PORT"] = str(config.port)
     env["MALTEGO_SERVER_PROTOCOL"] = "https" if ssl else "http"

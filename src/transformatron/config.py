@@ -26,6 +26,7 @@ class TransformatronConfig:
         scheme: ``http`` for local development, ``https`` for Graph Browser.
         project_dir: Directory holding ``project.py`` and ``transforms/``.
         state_dir: Directory for the PID file, log file, and generated certs.
+        env_file: Local file holding API keys for headless testing. Gitignored.
     """
 
     host: str = DEFAULT_HOST
@@ -33,6 +34,7 @@ class TransformatronConfig:
     scheme: str = "http"
     project_dir: Path = field(default_factory=lambda: REPO_ROOT / "server")
     state_dir: Path = field(default_factory=lambda: REPO_ROOT / ".transformatron")
+    env_file: Path = field(default_factory=lambda: REPO_ROOT / ".env")
 
     @property
     def base_url(self) -> str:

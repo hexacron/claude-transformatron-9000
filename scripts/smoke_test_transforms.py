@@ -14,10 +14,10 @@ Usage:
     uv run python scripts/smoke_test_transforms.py --transform <fully.qualified.id>
     uv run python scripts/smoke_test_transforms.py --setting API_KEY=xxx
 
-Transforms that need credentials take them through repeated ``--setting KEY=VALUE``,
-the same form the CLI uses. A transform that reports a missing setting is recorded as
-SKIP rather than FAIL, so an unconfigured credential is never mistaken for broken code
-— pass its setting to actually exercise it.
+Credentials are read from ``.env`` at the repository root, so a key written there once is
+picked up by every run. An explicit ``--setting KEY=VALUE`` overrides the file for that
+run. A transform that still reports a missing setting is recorded as SKIP rather than
+FAIL, so an unconfigured credential is never mistaken for broken code.
 
 The server must already be running. Transforms calling third-party APIs make live
 network requests, so a failure here can mean an upstream outage rather than broken
@@ -35,6 +35,7 @@ from typing import Any
 from transformatron import lifecycle
 from transformatron.client import TransformClient, TransformServerError
 from transformatron.config import load_config
+from transformatron.envfile import load_env_file
 
 # Sample inputs by entity type. Only types with an unambiguous, publicly routable
 # sample belong here; anything else is skipped rather than guessed at, so a skip
@@ -88,6 +89,13 @@ TRANSFORM_SAMPLES = {
     # sample takes. If it ages out of the dataset the transform still passes on the
     # negative verdict; re-pin from a current GreyNoise listing to keep the coverage.
     "greynoise_ip_reputation": "185.220.101.1",
+    # The generic "example" Phrase sample matches nothing on urlscan; a domain query
+    # exercises the search syntax the transform is built around.
+    "urlscan_search": "domain:github.com",
+    # The urlscan scan transforms take a UUID, which has no useful generic sample — any
+    # fixed id ages out of urlscan's retention. Left without an entry: they reject the
+    # generic Phrase sample and are recorded SKIP via INVALID_SAMPLE_MARKERS. Exercise
+    # them with a scan id produced by the search transform.
 }
 
 # A transform reporting one of these is unconfigured, not broken. Matched
@@ -114,6 +122,12 @@ NO_MATCH_MARKERS = (
     # A private or reserved address has no public routing data to return.
     "bogon",
 )
+
+# A transform reporting one of these rejected the sample input before making a request.
+# Distinct from a no-match: the transform is fine and the *sample* is unsuitable, which
+# happens when one entity type covers several input formats — a Phrase sample cannot be
+# both a search query and a scan UUID. Reported SKIP with a pointer at TRANSFORM_SAMPLES.
+INVALID_SAMPLE_MARKERS = ("invalid input",)
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 
@@ -211,6 +225,15 @@ async def check_transform(
                 SKIP,
                 f"upstream rate limit ({messages}) — re-run this transform on its own to judge it",
             )
+        # The transform rejected the sample before calling upstream. The code is fine;
+        # the sample does not fit this transform's input format.
+        if _matches(result.messages, INVALID_SAMPLE_MARKERS):
+            return Outcome(
+                transform_id,
+                SKIP,
+                f"sample input does not fit this transform ({messages}) — "
+                f"add a TRANSFORM_SAMPLES entry to exercise it",
+            )
         # The transform ran and said, explicitly, that this input has no results.
         # That is honest behaviour, not the silent empty return this gate hunts for.
         if _matches(result.messages, NO_MATCH_MARKERS):
@@ -251,6 +274,13 @@ async def run(
     """Smoke-test the registered transforms and return a process exit code."""
     config = lifecycle.resolve_config(load_config())
     client = TransformClient(config)
+
+    # Credentials from .env are passed as transform settings so credential-gated
+    # transforms are actually exercised rather than reported SKIP. An explicit
+    # --setting wins, which is what makes a one-off override possible.
+    merged_settings = load_env_file(config.env_file)
+    merged_settings.update(settings or {})
+    settings = merged_settings or None
 
     try:
         transforms = await client.list_transforms()
