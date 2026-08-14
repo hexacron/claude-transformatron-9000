@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from transformatron import operations
 from transformatron.config import TransformatronConfig
 from transformatron.scaffold import (
@@ -16,6 +18,7 @@ from transformatron.scaffold import (
     parse_openapi_spec,
     write_scaffold,
 )
+from transformatron.scaffold.generator import generate_api_module, generate_transform_module
 from transformatron.scaffold.schema import (
     OutputFieldMapping,
     infer_input_entity,
@@ -238,6 +241,106 @@ def test_write_scaffold(tmp_path: Path) -> None:
     assert (project_dir / "transforms" / "custom_api" / "api.py").exists()
     assert (project_dir / "transforms" / "custom_api" / "lookup.py").exists()
     assert "from transforms.custom_api.lookup import *" in project_py.read_text()
+
+
+def _service_config(service_id: str = "custom_api") -> ScaffoldServiceConfig:
+    """Return a minimal single-transform service config for write tests."""
+    return ScaffoldServiceConfig(
+        service_id=service_id,
+        display_name="Custom API",
+        base_url="https://api.custom.com",
+        transforms=[
+            ScaffoldTransformConfig(
+                transform_id="custom_lookup",
+                display_name="Custom API: Lookup",
+                input_entity="Domain",
+                endpoint_path="/check",
+                output_mappings=[OutputFieldMapping(field_name="status", entity_type="Phrase")],
+            )
+        ],
+    )
+
+
+def test_write_scaffold_refuses_to_overwrite(tmp_path: Path) -> None:
+    """A second scaffold of the same service must not clobber the first."""
+    project_dir = tmp_path / "server"
+    project_dir.mkdir()
+    cfg = _service_config()
+
+    write_scaffold(cfg, project_dir)
+    hand_edited = project_dir / "transforms" / "custom_api" / "api.py"
+    hand_edited.write_text("# hand-written behaviour a generator cannot recover\n")
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        write_scaffold(cfg, project_dir)
+
+    assert hand_edited.read_text().startswith("# hand-written")
+
+
+def test_write_scaffold_force_overwrites(tmp_path: Path) -> None:
+    """`force=True` is the deliberate escape hatch from the overwrite guard."""
+    project_dir = tmp_path / "server"
+    project_dir.mkdir()
+    cfg = _service_config()
+
+    write_scaffold(cfg, project_dir)
+    api_py = project_dir / "transforms" / "custom_api" / "api.py"
+    api_py.write_text("# stale\n")
+
+    write_scaffold(cfg, project_dir, force=True)
+
+    assert "IntegrationClient" in api_py.read_text()
+
+
+def test_write_scaffold_leaves_no_partial_write_on_clash(tmp_path: Path) -> None:
+    """A collision on any file aborts before the others are touched."""
+    project_dir = tmp_path / "server"
+    project_dir.mkdir()
+    cfg = _service_config()
+    svc_dir = project_dir / "transforms" / "custom_api"
+    svc_dir.mkdir(parents=True)
+    (svc_dir / "lookup.py").write_text("# only this one exists\n")
+
+    with pytest.raises(FileExistsError):
+        write_scaffold(cfg, project_dir)
+
+    assert not (svc_dir / "api.py").exists()
+    assert (svc_dir / "lookup.py").read_text() == "# only this one exists\n"
+
+
+def test_generated_code_has_no_unused_imports() -> None:
+    """Generated modules must not import what they do not use (ruff F401).
+
+    `server/transforms/` is linted, so a scaffold that emits unused imports hands the
+    author a failing gate on untouched, freshly generated code.
+    """
+    # No auth key: neither `os` nor TransformSetting is referenced by the output.
+    cfg = _service_config()
+    cfg.auth_key_name = None
+    api_code = generate_api_module(cfg)
+
+    assert "import os" not in api_code
+    assert "TransformSetting" not in api_code
+    # A Domain validator uses `re`; nothing here uses `ipaddress`.
+    assert "import ipaddress" not in api_code
+
+    # MAX_ITEMS is only imported when a list mapping actually caps a slice.
+    transform_code = generate_transform_module(cfg, cfg.transforms[0])
+    assert "MAX_ITEMS" not in transform_code
+
+
+def test_generated_entity_imports_are_isort_ordered() -> None:
+    """Acronym entities sort before CamelCase ones, matching ruff's isort rule."""
+    cfg = _service_config()
+    cfg.transforms[0].output_mappings = [
+        OutputFieldMapping(field_name="status", entity_type="Phrase"),
+        OutputFieldMapping(field_name="link", entity_type="URL"),
+        OutputFieldMapping(field_name="ip", entity_type="IPv4Address"),
+    ]
+
+    code = generate_transform_module(cfg, cfg.transforms[0])
+
+    assert "from maltego.entities import URL, Domain, IPv4Address, Phrase" in code
 
 
 def test_operations_scaffold_validation(tmp_path: Path) -> None:
