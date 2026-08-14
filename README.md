@@ -72,24 +72,97 @@ Assumes `uv sync` has run.
 
 ### With an agent
 
-Start the server once, then describe what you want:
+Open a coding agent in the clone and start the server:
 
 ```bash
 uv run python scripts/transformatron_cli.py start
 ```
 
-> Scaffold a transform for the ipinfo.io API from this cURL command, then run it and
-> show me the entities it returns:
-> `curl -H "Authorization: Bearer $TOKEN" https://ipinfo.io/8.8.8.8/json`
-
-The agent scaffolds the module, wires the import into `server/project.py`, restarts, runs the
-transform and reads the entity count back. When the upstream response does not match what the spec
-implied, it sees that in the output and corrects the mapping. That last part is why the server
-matters — a scaffold is a starting point, and only a live run shows what the API actually returns.
-
 Claude Code picks up `.claude/skills/maltego-transform-author/` from the clone; other agents read
-[`AGENTS.md`](AGENTS.md). Both route to `docs/transform-authoring.md` rather than restating it, and
-both carry the corrections in [Writing transforms](#writing-transforms).
+[`AGENTS.md`](AGENTS.md). Nothing to invoke — the guidance is already loaded. Then describe what you
+want:
+
+> Build a transform for urlscan.io's search endpoint, then run it and show me the entities:
+> `curl "https://urlscan.io/api/v1/search/?q=domain:example.com"`
+
+Here is the whole session, and what the agent is doing at each step.
+
+**1. It reads [`docs/transform-authoring.md`](docs/transform-authoring.md) first.** Two SDK
+behaviours fail silently — see [Writing transforms](#writing-transforms) — and the skill treats
+reading those corrections as a precondition for writing code.
+
+**2. It scaffolds:**
+
+```
+Scaffolded 'Urlscan' (urlscan):
+
+Created files:
+  - server/transforms/urlscan/__init__.py
+  - server/transforms/urlscan/api.py
+  - server/transforms/urlscan/lookup.py
+
+Transforms:
+  - Urlscan: Lookup (IPv6Address -> Phrase)
+
+Import added to server/project.py.
+```
+
+Note `IPv6Address -> Phrase`, which is wrong on both sides: the endpoint takes a search query and
+returns a list of scans. The scaffolder had a URL and nothing else, so it guessed from the
+parameter name and guessed badly. Correcting that is the next three steps, and it is the normal
+case rather than a mishap — pass `--sample-response` with real JSON and the output side improves,
+but only a live run settles it.
+
+**3. It restarts and confirms registration** — `restart`, then `list`. The server only loads code
+at startup, so an edit without a restart changes nothing. A transform missing from `list` almost
+always means a missing import in `project.py`, which `scaffold` writes for you.
+
+**4. It runs the transform and reads the output.** The generated code maps one `Phrase` out of the
+response, so the first run reports something like:
+
+```
+State: COMPLETED (success)
+Entities (1):
+  {"type": "maltego.Phrase", ...}
+```
+
+**This is the step that makes the difference.** `COMPLETED (success)` is not the answer — the
+entity count is. One `Phrase` holding a blob of text is not a useful transform: urlscan returns a
+list of scans, each with a page URL, an IP and an ASN. The agent now knows the real response shape,
+which the cURL command never told it.
+
+**5. It corrects the mapping and goes round again.** Take the input as a search `Phrase`, walk
+`results[]`, map `page.url` to a `URL`, `page.ip` to an `IPv4Address`, `page.domain` to a `Domain`
+and `page.asn` to an `AS`. Restart, run, read the entities again — the finished transform returns
+25 for this query rather than 1. Two or three passes is normal.
+
+**6. It gates the result:**
+
+```bash
+uv run python scripts/smoke_test_transforms.py
+```
+
+Runs every registered transform and fails on zero entities or an output type of `NONE`.
+
+#### What you decide
+
+The agent handles the mechanics. The judgement calls are yours:
+
+- **Which API, and which endpoints deserve transforms.**
+- **How responses map to entities.** Is `page.asn` an `AS` entity or a `Phrase`? That choice
+  decides whether the graph can pivot on it.
+- **When it is actually done.** The agent may accept one entity; you know the query should have
+  returned twenty.
+
+One habit is worth more than the rest: **when an agent says a transform works, ask what the entity
+count was.** That single question catches the failure mode this project exists to prevent.
+
+#### If the MCP tools are missing
+
+A fresh clone prompts once for approval of the `transformatron` MCP server and needs a session
+restart to load it. Until then the agent falls back to the CLI, which does exactly the same things.
+Seeing it shell out to `transformatron_cli.py` instead of calling `run_transform` is expected, not
+a fault.
 
 ### By hand
 
