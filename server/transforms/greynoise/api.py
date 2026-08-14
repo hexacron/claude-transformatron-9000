@@ -32,14 +32,22 @@ not obvious from the published documentation and are handled in :func:`fetch`:
 - **IPv4 only.** IPv6 and non-routable addresses return HTTP 400. The input is
   restricted to IPv4 rather than letting the upstream reject it.
 
-**The key header is not enforced on this endpoint.** Verified 2026-08-13: requests with
-no key, and with a deliberately malformed one, both return the same 200 or 404 as a
-valid key. The setting is still declared and sent — it is what the tier is documented to
-want, and it is how quota is attributed — but do not read a successful lookup as proof
-that a configured key is valid. The RIOT branch has not been observed firing on this
-tier; every known benign provider tried (8.8.8.8, 1.1.1.1, 8.8.4.4, OpenDNS) answered
-404 "not observed". If RIOT data never materialises with a valid key, that branch is
-dead code on Community and belongs in an Enterprise-tier transform instead.
+**An unrecognised key is not rejected; a recognised one is metered.** Verified
+2026-08-13: a request with no key and one with a deliberately malformed key both return
+the same 200 or 404 as a valid key, so a successful lookup is not evidence the configured
+key is valid. A *recognised* key is enforced in the one way that matters — quota. Once
+spent, every request returns HTTP 429 with ``{"plan": "Community", "rate_limit":
+"25-W"}``: roughly 25 lookups per week on the free tier, which the rate-limit branch in
+:func:`fetch` reports rather than crashing on.
+
+**The RIOT branch is unverified.** Every known benign provider tried unauthenticated
+(8.8.8.8, 1.1.1.1, 8.8.4.4, OpenDNS) answered 404 "not observed", and the weekly quota
+was exhausted before a keyed request could test it. The sample response this integration
+was written from shows 8.8.8.8 as ``classification: "benign"`` — RIOT-shaped — so the
+branch is likely correct and simply gated behind quota rather than dead. Confirm it with
+a single keyed
+lookup of 8.8.8.8 when the window resets; if RIOT never fires on Community, move that
+branch to an Enterprise-tier transform.
 """
 
 import ipaddress
@@ -131,10 +139,10 @@ async def fetch(
             "message": "IP not observed scanning the internet.",
         }
     except MaltegoException as exc:
-        # Mainly the Community-tier rate limit (429). Verified on 2026-08-13: an invalid
-        # key does *not* land here — the endpoint ignores the key header on this tier and
-        # answers 200 regardless, so there is no auth-failure path to catch. A revoked
-        # key is untested and may behave differently.
+        # The Community-tier rate limit (429), confirmed live on 2026-08-13 — roughly 25
+        # lookups per week, after which every request lands here until the window resets.
+        # An invalid key does *not*: the endpoint accepts unrecognised keys and answers
+        # 200, so there is no auth-failure path to catch. A revoked key is untested.
         context.log.fatal(f"GreyNoise lookup failed: {exc.message}")
         return None
 
