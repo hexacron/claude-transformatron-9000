@@ -329,6 +329,96 @@ def test_generated_code_has_no_unused_imports() -> None:
     assert "MAX_ITEMS" not in transform_code
 
 
+def test_multiple_validators_are_blank_line_separated() -> None:
+    """Two input types emit two validators, which need two blank lines between them.
+
+    Single-validator services hid this: the separator only had to hold before `fetch`.
+    """
+    cfg = ScaffoldServiceConfig(
+        service_id="multi",
+        display_name="Multi",
+        base_url="https://api.multi.com",
+        auth_key_name="MULTI_API_KEY",
+        transforms=[
+            ScaffoldTransformConfig(
+                transform_id="by_ip",
+                display_name="Multi: By IP",
+                input_entity="IPv4Address",
+                endpoint_path="/ip",
+            ),
+            ScaffoldTransformConfig(
+                transform_id="by_domain",
+                display_name="Multi: By Domain",
+                input_entity="Domain",
+                endpoint_path="/domain",
+            ),
+        ],
+    )
+
+    code = generate_api_module(cfg)
+
+    assert "\n\n\ndef validate_domain" in code
+    assert "\n\n\nasync def fetch" in code
+
+
+def test_openapi_search_param_falls_back_to_real_name() -> None:
+    """An endpoint with no entity-like parameter still uses its real query param name.
+
+    Leaving the "input_val" placeholder builds a query string the upstream rejects, and
+    it only fails at runtime against the live API.
+    """
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": "Searchy", "version": "1.0.0"},
+        "servers": [{"url": "https://searchy.example"}],
+        "paths": {
+            "/api/v1/search": {
+                "get": {
+                    "operationId": "searchdatasource",
+                    "summary": "Search",
+                    "parameters": [
+                        {"name": "q", "in": "query", "required": True},
+                        {"name": "size", "in": "query"},
+                    ],
+                    "responses": {"200": {"content": {"application/json": {"schema": {}}}}},
+                }
+            }
+        },
+    }
+
+    cfg = parse_openapi_spec(spec, service_name="searchy")
+    transform = cfg.transforms[0]
+
+    assert transform.input_param_name == "q"
+    assert transform.input_entity == "Phrase"
+    assert "input_val" not in generate_transform_module(cfg, transform)
+
+
+def test_openapi_path_parameter_is_not_turned_into_a_query_param() -> None:
+    """A templated path keeps interpolating {target} rather than gaining a query string."""
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": "Pathy", "version": "1.0.0"},
+        "servers": [{"url": "https://pathy.example"}],
+        "paths": {
+            "/api/v1/hostname/{hostname}": {
+                "get": {
+                    "operationId": "gethostname",
+                    "summary": "Hostname",
+                    "parameters": [{"name": "hostname", "in": "path", "required": True}],
+                    "responses": {"200": {"content": {"application/json": {"schema": {}}}}},
+                }
+            }
+        },
+    }
+
+    cfg = parse_openapi_spec(spec, service_name="pathy")
+    code = generate_transform_module(cfg, cfg.transforms[0])
+
+    assert 'path = f"/api/v1/hostname/{target}"' in code
+    assert "params = None" in code
+
+
 def test_generated_entity_imports_are_isort_ordered() -> None:
     """Acronym entities sort before CamelCase ones, matching ruff's isort rule."""
     cfg = _service_config()

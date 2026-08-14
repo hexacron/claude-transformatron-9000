@@ -81,8 +81,10 @@ def generate_api_module(config: ScaffoldServiceConfig) -> str:
 """)
 
     # Two blank lines between top-level defs, or `ruff format --check` reformats the
-    # generated file and the project's format gate fails on brand-new code.
-    validators_str = "\n\n".join(block.rstrip("\n") for block in val_code_blocks)
+    # generated file and the project's format gate fails on brand-new code. A service
+    # whose transforms take different input types emits one validator per type, so the
+    # separator has to hold between them and not just before `fetch`.
+    validators_str = "\n\n\n".join(block.rstrip("\n") for block in val_code_blocks)
 
     # Only the regex-based validators use `re`, and only IP inputs use `ipaddress`.
     # Emitting both unconditionally leaves an unused import, which fails the project's

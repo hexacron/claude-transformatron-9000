@@ -231,14 +231,27 @@ def parse_openapi_spec(
             input_entity = "IPv4Address"
             input_param_name = "input_val"
             params = operation.get("parameters", [])
-            for p in params:
-                if isinstance(p, dict):
-                    p_name = p.get("name", "")
-                    inferred_entity, _ = infer_input_entity(p_name)
-                    if inferred_entity != "Phrase":
-                        input_entity = inferred_entity
-                        input_param_name = p_name
-                        break
+            named_params = [p for p in params if isinstance(p, dict) and p.get("name")]
+
+            matched_param = False
+            for p in named_params:
+                p_name = p["name"]
+                inferred_entity, _ = infer_input_entity(p_name)
+                if inferred_entity != "Phrase":
+                    input_entity = inferred_entity
+                    input_param_name = p_name
+                    matched_param = True
+                    break
+
+            # No parameter looks like a known entity — a free-text search endpoint, for
+            # instance. Fall back to the first required parameter (or the first one at
+            # all) as a Phrase input, because leaving the "input_val" placeholder emits
+            # a query string the upstream does not accept and fails only at runtime.
+            if not matched_param and named_params:
+                required = [p for p in named_params if p.get("required")]
+                chosen = (required or named_params)[0]
+                input_entity = "Phrase"
+                input_param_name = chosen["name"]
 
             # Identify outputs from 200 response schema
             output_mappings: list[OutputFieldMapping] = []
