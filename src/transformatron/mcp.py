@@ -140,6 +140,30 @@ def generate_certs(force: bool = False) -> str:
     return operations.generate_certs(CONFIG, force=force)
 
 
+@server.tool()
+def scaffold_transform(
+    service: str | None = None,
+    curl: str | None = None,
+    openapi: str | None = None,
+    sample_response: str | None = None,
+) -> str:
+    """Scaffold a new Maltego transform module from a cURL command or OpenAPI specification.
+
+    Args:
+        service: Optional service name slug (e.g. 'greynoise', 'threatfox').
+        curl: A full cURL command string demonstrating an API request.
+        openapi: An OpenAPI/Swagger spec string or file path.
+        sample_response: Optional sample JSON response string to infer output fields.
+    """
+    return operations.scaffold(
+        CONFIG,
+        service=service,
+        curl=curl,
+        openapi=openapi,
+        sample_response=sample_response,
+    )
+
+
 def main() -> None:
     """Run the MCP server over stdio."""
     server.run(transport="stdio")

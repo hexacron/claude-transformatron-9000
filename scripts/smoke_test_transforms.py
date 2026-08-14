@@ -81,6 +81,13 @@ TRANSFORM_SAMPLES = {
     "crowdsec_ip_to_network": "141.98.11.30",
     "crowdsec_ip_to_location": "141.98.11.30",
     "crowdsec_ip_to_targets": "141.98.11.30",
+    # GreyNoise returns a verdict for any routable IPv4, so these do not strictly need a
+    # sample of their own. This one is pinned to an address confirmed to be actively
+    # scanning, so a pass exercises the populated branch — classification, actor and
+    # Visualizer link — rather than only the "not observed" path the generic 8.8.8.8
+    # sample takes. If it ages out of the dataset the transform still passes on the
+    # negative verdict; re-pin from a current GreyNoise listing to keep the coverage.
+    "greynoise_ip_reputation": "185.220.101.1",
 }
 
 # A transform reporting one of these is unconfigured, not broken. Matched

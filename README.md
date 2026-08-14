@@ -167,6 +167,7 @@ Every operation is available as a CLI command and as an MCP tool. Both call the 
 | Run one transform | `run <id> <type> <value>` | `run_transform(...)` |
 | Seed URL and registration steps | `seed-url` | `get_seed_url()` |
 | Self-signed cert for HTTPS | `certs [--force]` | `generate_certs(force=False)` |
+| Scaffold from cURL / OpenAPI | `scaffold [--curl ...]` | `scaffold_transform(...)` |
 
 CLI commands are prefixed `uv run python scripts/transformatron_cli.py`:
 

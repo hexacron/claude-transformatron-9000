@@ -57,7 +57,7 @@ uv run python scripts/transformatron_cli.py logs --lines 100
 
 **MCP** — for agents that speak it (Claude Code is configured in `.mcp.json`): `server_start`,
 `server_stop`, `server_restart`, `server_status`, `server_logs`, `list_transforms`,
-`get_transform`, `list_entities`, `run_transform`, `get_seed_url`, `generate_certs`.
+`get_transform`, `list_entities`, `run_transform`, `get_seed_url`, `generate_certs`, `scaffold_transform`.
 
 Both produce identical output. If you add an operation, put it in
 `src/transformatron/operations.py` so both front ends get it.

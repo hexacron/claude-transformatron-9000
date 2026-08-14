@@ -74,17 +74,17 @@ async def my_transform(input_entity: IPv4Address, context: MaltegoContext) -> li
 ## The loop
 
 1. Add or edit a module under `server/transforms/`.
+   - For new APIs, use `scaffold_transform` (MCP) or `uv run python scripts/transformatron_cli.py scaffold --curl "..."`
+     to automatically generate the validated `api.py` and transform modules.
 2. **Import it in `server/project.py`** — `from transforms.my_module import *`, alongside the
-   existing imports at the top of the file. The server only registers what `project.py` imports.
-   This is the most common reason a new transform never appears. Appending the import to the end
-   of the file does not work: it lands after the `if __name__ == "__main__"` block, so the module
-   is imported but nothing is registered by the time the server starts.
+   existing imports at the top of the file. (The scaffolder does this automatically).
+   The server only registers what `project.py` imports.
 3. Restart the server — this is the reload path.
 4. Confirm it registered with the right input/output types.
 5. Run it against a real input.
 
-Steps 3–5 work two ways. With an agent that has the `transformatron` MCP server configured
-(currently Claude Code — see `AGENTS.md`), use the `server_restart`, `list_transforms`, and
+Steps 1 and 3–5 work two ways. With an agent that has the `transformatron` MCP server configured
+(currently Claude Code — see `AGENTS.md`), use the `scaffold_transform`, `server_restart`, `list_transforms`, and
 `run_transform` tools. Otherwise use the CLI, which is what those tools call:
 
 ```bash
