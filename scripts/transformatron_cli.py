@@ -87,6 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--setting", action="append", metavar="KEY=VALUE")
     run.add_argument("--timeout", type=float, default=60.0)
 
+    scaffold = sub.add_parser("scaffold", help="Scaffold a new transform from cURL or OpenAPI")
+    scaffold.add_argument("--service", help="Service name slug (e.g. greynoise)")
+    scaffold.add_argument("--curl", help="cURL command string")
+    scaffold.add_argument("--openapi", help="OpenAPI/Swagger JSON/YAML spec file or URL")
+    scaffold.add_argument("--sample-response", help="Sample JSON response string")
+
     return parser
 
 
@@ -124,6 +130,14 @@ def dispatch(args: argparse.Namespace) -> str:
                     _parse_settings(args.setting),
                     args.timeout,
                 )
+            )
+        case "scaffold":
+            return operations.scaffold(
+                config,
+                service=args.service,
+                curl=args.curl,
+                openapi=args.openapi,
+                sample_response=args.sample_response,
             )
     raise SystemExit(f"Unknown command: {args.command}")
 

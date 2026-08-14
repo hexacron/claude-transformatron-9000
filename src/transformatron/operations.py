@@ -8,11 +8,17 @@ Add an operation here, not in a front end.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from transformatron import certs, lifecycle
 from transformatron.client import TransformClient, TransformServerError
 from transformatron.config import TransformatronConfig
+from transformatron.scaffold import (
+    parse_curl_command,
+    parse_openapi_spec,
+    write_scaffold,
+)
 
 
 def format_transform(transform: dict[str, Any]) -> str:
@@ -161,3 +167,60 @@ def generate_certs(config: TransformatronConfig, force: bool = False) -> str:
 def logs(config: TransformatronConfig, lines: int = 50) -> str:
     """Return recent server log output."""
     return lifecycle.tail_log(config, lines)
+
+
+def scaffold(
+    config: TransformatronConfig,
+    service: str | None = None,
+    curl: str | None = None,
+    openapi: str | None = None,
+    sample_response: dict[str, Any] | str | None = None,
+) -> str:
+    """Scaffold a new Maltego transform module package from a cURL command or OpenAPI spec."""
+    if not curl and not openapi:
+        return "Failed to scaffold: Provide either a --curl command or an --openapi spec."
+
+    # Only the failures a caller can act on are caught: a malformed spec, a cURL command
+    # with no URL, or a service that already exists. A bare `except Exception` here would
+    # also swallow the FileExistsError guarding hand-written modules and report it as
+    # ordinary prose, and would hide genuine bugs in the generator behind a string.
+    try:
+        if curl:
+            scaffold_cfg = parse_curl_command(
+                curl_cmd=curl,
+                sample_response=sample_response,
+                service_name=service,
+            )
+        else:
+            openapi_path = Path(openapi or "")
+            openapi_content = openapi_path.read_text() if openapi_path.is_file() else openapi or ""
+            scaffold_cfg = parse_openapi_spec(
+                spec=openapi_content,
+                service_name=service,
+            )
+
+        created_files = write_scaffold(scaffold_cfg, config.project_dir)
+    except ValueError as exc:
+        # json.JSONDecodeError subclasses ValueError, so a malformed spec lands here too.
+        return f"Failed to scaffold: {exc}"
+    except FileExistsError as exc:
+        return f"Failed to scaffold: {exc}"
+    except OSError as exc:
+        return f"Failed to scaffold: could not write to {config.project_dir}: {exc}"
+
+    file_lines = "\n".join(f"  - {f}" for f in created_files)
+    transforms_list = "\n".join(
+        f"  - {t.display_name} ({t.input_entity} -> {', '.join(t.output_entity_types)})"
+        for t in scaffold_cfg.transforms
+    )
+
+    return (
+        f"Scaffolded '{scaffold_cfg.display_name}' ({scaffold_cfg.service_id}):\n\n"
+        f"Created files:\n{file_lines}\n\n"
+        f"Transforms:\n{transforms_list}\n\n"
+        f"Import added to server/project.py.\n"
+        f"Next steps:\n"
+        f"1. Run 'transformatron_cli.py restart' to load the new transform.\n"
+        f"2. Run 'transformatron_cli.py list' to confirm registration.\n"
+        f"3. Run 'smoke_test_transforms.py' to verify entity output."
+    )

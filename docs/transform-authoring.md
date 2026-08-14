@@ -74,17 +74,17 @@ async def my_transform(input_entity: IPv4Address, context: MaltegoContext) -> li
 ## The loop
 
 1. Add or edit a module under `server/transforms/`.
+   - For new APIs, use `scaffold_transform` (MCP) or `uv run python scripts/transformatron_cli.py scaffold --curl "..."`
+     to automatically generate the validated `api.py` and transform modules.
 2. **Import it in `server/project.py`** — `from transforms.my_module import *`, alongside the
-   existing imports at the top of the file. The server only registers what `project.py` imports.
-   This is the most common reason a new transform never appears. Appending the import to the end
-   of the file does not work: it lands after the `if __name__ == "__main__"` block, so the module
-   is imported but nothing is registered by the time the server starts.
+   existing imports at the top of the file. (The scaffolder does this automatically).
+   The server only registers what `project.py` imports.
 3. Restart the server — this is the reload path.
 4. Confirm it registered with the right input/output types.
 5. Run it against a real input.
 
-Steps 3–5 work two ways. With an agent that has the `transformatron` MCP server configured
-(currently Claude Code — see `AGENTS.md`), use the `server_restart`, `list_transforms`, and
+Steps 1 and 3–5 work two ways. With an agent that has the `transformatron` MCP server configured
+(currently Claude Code — see `AGENTS.md`), use the `scaffold_transform`, `server_restart`, `list_transforms`, and
 `run_transform` tools. Otherwise use the CLI, which is what those tools call:
 
 ```bash
@@ -188,6 +188,43 @@ The server subprocess inherits the parent shell's environment (`lifecycle.build_
 key exported once survives restarts and re-imports. The client setting still wins. This is a
 development convenience — it puts the key in the process environment, which is fine for a local
 server and not appropriate for a shared deployment.
+
+### Writing keys down: `.env`
+
+Exporting works but is easy to get wrong — an export does not survive between shells, and a key
+set after the server started never reaches it. Write the keys to `.env` at the repository root
+instead:
+
+```bash
+cp .env.example .env   # then fill in the keys you have
+```
+
+`build_server_env` merges that file into the server subprocess on every start, and
+`scripts/smoke_test_transforms.py` reads it too, so credential-gated transforms are exercised
+rather than reported SKIP. **Restart the server after editing it** — the environment is read once
+at start. An exported shell variable still overrides the file, and an explicit `--setting` still
+overrides both.
+
+`.env` is gitignored; `.env.example` is the committed template and must never hold a real key.
+
+**A wrong key can be worse than no key.** urlscan answers HTTP 400 for an `api-key` header it does
+not recognise, including on endpoints that work fine anonymously — so a placeholder left in `.env`
+breaks transforms that would otherwise pass. Leave a key blank rather than filling it with
+something fake.
+
+## Keeping an integration out of the repository
+
+Anything under `server/transforms/local/` is gitignored and discovered at server start by
+`_register_local_transforms` in `server/project.py`. Use it for integrations that should not be
+published; the committed packages alongside it are reference examples and stay imported by name.
+
+```
+server/transforms/local/<service>/{__init__,api,<transform>}.py
+```
+
+Discovery imports every module in each package except `api.py`, so no `project.py` edit is needed
+— which also means the usual "did you add the import?" failure does not apply there. A clone
+without the directory still boots, and only `local/__init__.py` is tracked.
 
 ## Security
 

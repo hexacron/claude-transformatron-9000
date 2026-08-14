@@ -45,15 +45,17 @@ nothing.
 ## The loop
 
 ```bash
-# 1. edit a module under server/transforms/
-# 2. import it in server/project.py
+# 1. scaffold or edit a module under server/transforms/
+#    - To scaffold a new API: uv run python scripts/transformatron_cli.py scaffold --curl "..."
+#    - Or use the scaffold_transform MCP tool
+# 2. confirm import is in server/project.py (scaffold does this automatically)
 uv run python scripts/transformatron_cli.py restart          # 3. reload
 uv run python scripts/transformatron_cli.py list             # 4. confirm types
 uv run python scripts/transformatron_cli.py run <id> <type> <value> --setting KEY=VALUE
 ```
 
-With the `transformatron` MCP server available, `server_restart`, `list_transforms` and
-`run_transform` do the same thing. Both front ends call `src/transformatron/operations.py`.
+With the `transformatron` MCP server available, `scaffold_transform`, `server_restart`,
+`list_transforms` and `run_transform` do the same thing. Both front ends call `src/transformatron/operations.py`.
 
 ## Verify before saying it works
 
