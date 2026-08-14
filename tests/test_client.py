@@ -38,11 +38,24 @@ def status_event(text: str) -> dict[str, Any]:
 
 
 class FakeServer:
-    """Scripts a sequence of poll responses for one transform run."""
+    """Scripts a sequence of poll responses for one transform run.
 
-    def __init__(self, poll_responses: list[dict[str, Any]], run_id: str = "run-1") -> None:
+    Models the real server's two relevant behaviours: it serves events from the
+    ``eventPointer`` the client asks for, and it caps a single response at ``page_size``
+    events while reporting the true total in ``eventCount``. A fake that ignored the pointer
+    let a client that never paged look correct — that is how truncation at 25 entities went
+    unnoticed.
+    """
+
+    def __init__(
+        self,
+        poll_responses: list[dict[str, Any]],
+        run_id: str = "run-1",
+        page_size: int = 50,
+    ) -> None:
         self._poll_responses = poll_responses
         self._run_id = run_id
+        self._page_size = page_size
         self.polls = 0
         self.cancelled = False
 
@@ -53,9 +66,17 @@ class FakeServer:
             return httpx.Response(200, json={})
         if request.method == "POST":
             return httpx.Response(201, json={"result": {"runId": self._run_id, "state": "RUNNING"}})
+
         index = min(self.polls, len(self._poll_responses) - 1)
         self.polls += 1
-        return httpx.Response(201, json=self._poll_responses[index])
+        response = self._poll_responses[index]
+
+        run = dict(response.get("result", {}))
+        events = list(run.get("events", []) or [])
+        pointer = int(request.url.params.get("eventPointer", 0))
+        run["eventCount"] = len(events)
+        run["events"] = events[pointer : pointer + self._page_size]
+        return httpx.Response(201, json={**response, "result": run})
 
 
 @pytest.fixture
@@ -163,6 +184,26 @@ async def test_events_are_not_double_counted_across_polls(
     result = await TransformClient(config).run_transform("t", "maltego.Phrase", "x", timeout=5)
 
     assert [e["value"] for e in result.entities] == ["one", "two"]
+
+
+async def test_entities_beyond_one_page_are_collected(
+    config: TransformatronConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run larger than one page is read to the end rather than truncated.
+
+    The results endpoint answers with at most a page of events and reports the true total in
+    eventCount. Reading only the first response silently dropped everything past it: a
+    transform returning 50 entities was reported as returning 25, with the run still marked
+    COMPLETED (success).
+    """
+    events = [entity_event(f"e{i:03d}") for i in range(120)]
+    fake = FakeServer([{"result": {"state": "COMPLETED", "events": events}}], page_size=50)
+    patch_transport(monkeypatch, fake)
+
+    result = await TransformClient(config).run_transform("t", "maltego.Phrase", "x", timeout=5)
+
+    assert len(result.entities) == 120
+    assert [e["value"] for e in result.entities] == [f"e{i:03d}" for i in range(120)]
 
 
 async def test_timeout_cancels_the_run_server_side(

@@ -204,15 +204,16 @@ class TransformClient:
         deadline = loop.time() + timeout
 
         while True:
-            payload = await self._request("GET", f"transforms/{transform_id}/run/{run_id}/results")
-            run = (payload or {}).get("result", {})
+            run = await self._fetch_events_from(transform_id, run_id, seen)
             result.state = run.get("state", result.state)
 
             events = run.get("events", []) or []
-            # The server replays the full event list on every poll; only take the
-            # events that arrived since the previous one.
-            collect_events(events[seen:], result)
-            seen = len(events)
+            # `seen` is an absolute offset into the run's event list, and the request above
+            # starts from it, so these events are all new. The server replays from whatever
+            # pointer it is given, and pages, so a run is only fully read once the pointer
+            # reaches eventCount — see _fetch_events_from.
+            collect_events(events, result)
+            seen += len(events)
 
             if result.state in TERMINAL_STATES:
                 return result
@@ -229,6 +230,44 @@ class TransformClient:
                 return result
 
             await asyncio.sleep(POLL_INTERVAL)
+
+    async def _fetch_events_from(
+        self, transform_id: str, run_id: str, pointer: int
+    ) -> dict[str, Any]:
+        """Return the run document with every event from `pointer` onward.
+
+        The results endpoint pages: it answers with at most ``v3_page_size_max`` events (50 by
+        default) however many the run produced, and reports the true total in ``eventCount``.
+        Reading a single response therefore truncates any run that emitted more — 50 events is
+        25 entities, because each entity arrives as two events, which is why a transform
+        returning 50 entities appeared to return exactly 25.
+
+        The pages are concatenated here so the caller sees one continuous event list.
+        """
+        path = f"transforms/{transform_id}/run/{run_id}/results"
+        payload = await self._request("GET", path, params={"eventPointer": pointer})
+        run = (payload or {}).get("result", {}) or {}
+        events = list(run.get("events", []) or [])
+
+        total = run.get("eventCount")
+        if not isinstance(total, int):
+            return run
+
+        offset = pointer + len(events)
+        while offset < total and events:
+            payload = await self._request("GET", path, params={"eventPointer": offset})
+            page = (payload or {}).get("result", {}) or {}
+            page_events = list(page.get("events", []) or [])
+            if not page_events:
+                break
+            events.extend(page_events)
+            offset += len(page_events)
+            # A later page carries the newer state and count; keep them so a run that
+            # finishes mid-read is not reported with the state it had on the first page.
+            run = page
+
+        run["events"] = events
+        return run
 
 
 def _unwrap_list(payload: Any, key: str) -> list[dict[str, Any]]:
