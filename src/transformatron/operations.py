@@ -8,6 +8,7 @@ Add an operation here, not in a front end.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from transformatron import certs, lifecycle
@@ -179,6 +180,10 @@ def scaffold(
     if not curl and not openapi:
         return "Failed to scaffold: Provide either a --curl command or an --openapi spec."
 
+    # Only the failures a caller can act on are caught: a malformed spec, a cURL command
+    # with no URL, or a service that already exists. A bare `except Exception` here would
+    # also swallow the FileExistsError guarding hand-written modules and report it as
+    # ordinary prose, and would hide genuine bugs in the generator behind a string.
     try:
         if curl:
             scaffold_cfg = parse_curl_command(
@@ -186,25 +191,22 @@ def scaffold(
                 sample_response=sample_response,
                 service_name=service,
             )
-        elif openapi:
-            # Check if openapi is a file path
-            from pathlib import Path
-
-            openapi_path = Path(openapi)
-            if openapi_path.exists() and openapi_path.is_file():
-                openapi_content = openapi_path.read_text()
-            else:
-                openapi_content = openapi
+        else:
+            openapi_path = Path(openapi or "")
+            openapi_content = openapi_path.read_text() if openapi_path.is_file() else openapi or ""
             scaffold_cfg = parse_openapi_spec(
                 spec=openapi_content,
                 service_name=service,
             )
-        else:
-            return "Failed to scaffold: Invalid parameters."
 
         created_files = write_scaffold(scaffold_cfg, config.project_dir)
-    except Exception as exc:
+    except ValueError as exc:
+        # json.JSONDecodeError subclasses ValueError, so a malformed spec lands here too.
         return f"Failed to scaffold: {exc}"
+    except FileExistsError as exc:
+        return f"Failed to scaffold: {exc}"
+    except OSError as exc:
+        return f"Failed to scaffold: could not write to {config.project_dir}: {exc}"
 
     file_lines = "\n".join(f"  - {f}" for f in created_files)
     transforms_list = "\n".join(

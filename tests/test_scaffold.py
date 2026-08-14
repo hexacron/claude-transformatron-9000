@@ -450,3 +450,130 @@ def test_operations_scaffold_validation(tmp_path: Path) -> None:
     )
     assert "Scaffolded 'Threat'" in res_success
     assert (config.project_dir / "transforms" / "threat" / "api.py").exists()
+
+
+def _query_auth_spec() -> dict[str, object]:
+    """Return a spec whose API key travels in the query string, not a header."""
+    return {
+        "openapi": "3.0.0",
+        "info": {"title": "Queryauth", "version": "1.0.0"},
+        "servers": [{"url": "https://qa.example"}],
+        "components": {
+            "securitySchemes": {"apiKey": {"type": "apiKey", "in": "query", "name": "apikey"}}
+        },
+        "paths": {
+            "/lookup": {
+                "get": {
+                    "operationId": "lookup",
+                    "summary": "Lookup",
+                    "parameters": [{"name": "ip", "in": "query", "required": True}],
+                    "responses": {"200": {"content": {"application/json": {"schema": {}}}}},
+                }
+            }
+        },
+    }
+
+
+def test_query_auth_scheme_is_recorded_by_the_parser() -> None:
+    """An `in: query` apiKey scheme records the parameter name it must be sent under."""
+    cfg = parse_openapi_spec(_query_auth_spec(), service_name="qa")
+
+    assert cfg.auth_type == "query"
+    assert cfg.auth_query_param == "apikey"
+
+
+def test_query_auth_key_is_actually_sent() -> None:
+    """A query-auth client sends the key.
+
+    The generated fetch() refused to run without a key and then never attached it, so
+    every request went out unauthenticated and failed only against the live API.
+    """
+    cfg = parse_openapi_spec(_query_auth_spec(), service_name="qa")
+    code = generate_api_module(cfg)
+
+    assert 'params["apikey"] = api_key' in code
+    # params may arrive as None from a templated path, so it is copied before mutation.
+    assert "params = dict(params or {})" in code
+
+
+def test_colliding_transform_ids_are_all_generated() -> None:
+    """Operations that slugify to the same id each get a module.
+
+    "do scan" and "do-scan" both slugify to do_scan. Keying the output dict on that
+    dropped every colliding transform but the last, and the duplicate function name
+    would have shadowed the survivor inside the module anyway.
+    """
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": "Dup", "version": "1.0.0"},
+        "servers": [{"url": "https://dup.example"}],
+        "paths": {
+            "/a/scan": {
+                "get": {
+                    "operationId": "do scan",
+                    "parameters": [{"name": "q", "in": "query", "required": True}],
+                    "responses": {},
+                }
+            },
+            "/b/scan": {
+                "get": {
+                    "operationId": "do-scan",
+                    "parameters": [{"name": "q", "in": "query", "required": True}],
+                    "responses": {},
+                }
+            },
+        },
+    }
+
+    cfg = parse_openapi_spec(spec, service_name="dup")
+    files = generate_service_code(cfg)
+
+    module_files = sorted(n for n in files if n not in ("__init__.py", "api.py"))
+    assert module_files == ["do_scan.py", "do_scan_2.py"]
+    assert "async def do_scan(" in files["do_scan.py"]
+    assert "async def do_scan_2(" in files["do_scan_2.py"]
+
+
+def test_generate_service_code_does_not_mutate_config() -> None:
+    """Deduplicating filenames must not rewrite the caller's transform ids."""
+    cfg = parse_openapi_spec(
+        {
+            "openapi": "3.0.0",
+            "info": {"title": "Dup2", "version": "1.0.0"},
+            "servers": [{"url": "https://dup2.example"}],
+            "paths": {
+                "/a": {"get": {"operationId": "x y", "parameters": [], "responses": {}}},
+                "/b": {"get": {"operationId": "x-y", "parameters": [], "responses": {}}},
+            },
+        },
+        service_name="dup2",
+    )
+
+    generate_service_code(cfg)
+
+    assert [t.transform_id for t in cfg.transforms] == ["x_y", "x_y"]
+
+
+def test_scaffold_reports_existing_service_instead_of_overwriting(tmp_path: Path) -> None:
+    """The FileExistsError guard reaches the caller as a message, not a traceback."""
+    config = TransformatronConfig(project_dir=tmp_path / "server", state_dir=tmp_path / "state")
+    config.project_dir.mkdir(parents=True)
+    (config.project_dir / "project.py").write_text("")
+
+    curl = "curl https://api.threat.com/v1/domain/example.com"
+    first = operations.scaffold(config, service="threat", curl=curl)
+    assert "Scaffolded" in first
+
+    second = operations.scaffold(config, service="threat", curl=curl)
+    assert "Failed to scaffold" in second
+    assert "already exists" in second
+
+
+def test_scaffold_reports_malformed_openapi_spec(tmp_path: Path) -> None:
+    """A spec that is not JSON is a caller error, reported rather than raised."""
+    config = TransformatronConfig(project_dir=tmp_path / "server", state_dir=tmp_path / "state")
+    config.project_dir.mkdir(parents=True)
+
+    result = operations.scaffold(config, service="broken", openapi="{not json at all")
+
+    assert "Failed to scaffold" in result

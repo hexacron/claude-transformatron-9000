@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from pathlib import Path
 
 from transformatron.scaffold.schema import (
@@ -98,11 +99,20 @@ def generate_api_module(config: ScaffoldServiceConfig) -> str:
         stdlib_imports.append("import re")
     stdlib_imports_str = "\n".join(stdlib_imports)
 
+    # A "query" scheme carries the key in the query string, not a header. It gets merged
+    # into `params` inside the generated fetch() rather than emitted here, because the
+    # caller owns that dict and the key has to survive params=None.
     auth_header_expr = ""
+    auth_query_code = ""
     if config.auth_key_name:
         if config.auth_type == "bearer":
             auth_header_expr = 'headers={"Authorization": f"Bearer {api_key}"}'
-        elif config.auth_type == "header":
+        elif config.auth_type == "query":
+            query_param = config.auth_query_param or config.auth_header_name or "apikey"
+            auth_query_code = (
+                f'\n    params = dict(params or {{}})\n    params["{query_param}"] = api_key\n'
+            )
+        else:
             auth_header_expr = f'headers={{"{config.auth_header_name or "X-API-KEY"}": api_key}}'
 
     # TransformSetting is only referenced by the generated api_key_setting(), so an
@@ -169,7 +179,7 @@ async def fetch(
     params: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Fetch `path` from {config.display_name}, returning None on failure."""
-{auth_check_code}
+{auth_check_code}{auth_query_code}
     try:
         response = await client.get(
             f"{{BASE_URL}}{{path}}",
@@ -302,8 +312,19 @@ def generate_service_code(config: ScaffoldServiceConfig) -> dict[str, str]:
     if len(config.transforms) == 1:
         files["lookup.py"] = generate_transform_module(config, config.transforms[0])
     else:
+        # Distinct operations can slugify to the same id ("do scan" and "do-scan" both
+        # become do_scan). Keying the dict on that alone silently dropped every transform
+        # but the last, and the function name collided inside the module too, so the
+        # server registered one of them. Suffix the duplicates instead.
+        seen: dict[str, int] = {}
         for t in config.transforms:
-            files[f"{t.transform_id}.py"] = generate_transform_module(config, t)
+            base_id = t.transform_id
+            seen[base_id] = seen.get(base_id, 0) + 1
+            if seen[base_id] == 1:
+                files[f"{base_id}.py"] = generate_transform_module(config, t)
+                continue
+            unique = replace(t, transform_id=f"{base_id}_{seen[base_id]}")
+            files[f"{unique.transform_id}.py"] = generate_transform_module(config, unique)
 
     return files
 

@@ -194,6 +194,7 @@ def parse_openapi_spec(
     auth_key_name = f"{svc_id.upper()}_API_KEY"
     auth_header_name = "X-API-KEY"
     auth_type = "header"
+    auth_query_param: str | None = None
 
     components = spec.get("components", {}) or {}
     sec_defs = spec.get("securityDefinitions", {}) or {}
@@ -207,6 +208,10 @@ def parse_openapi_spec(
             elif sec_type == "apikey":
                 auth_type = "header" if s_def.get("in") == "header" else "query"
                 auth_header_name = s_def.get("name", "X-API-KEY")
+                if auth_type == "query":
+                    # The generated client sends the key under this name; without it the
+                    # request goes out unauthenticated and fails only against the live API.
+                    auth_query_param = s_def.get("name", "apikey")
             break
 
     transforms: list[ScaffoldTransformConfig] = []
@@ -293,6 +298,7 @@ def parse_openapi_spec(
         base_url=base_url,
         auth_key_name=auth_key_name,
         auth_header_name=auth_header_name,
+        auth_query_param=auth_query_param,
         auth_type=auth_type,
         transforms=transforms,
     )
