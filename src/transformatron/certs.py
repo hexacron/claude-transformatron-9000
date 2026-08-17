@@ -11,9 +11,15 @@ from dataclasses import dataclass
 
 from transformatron.config import TransformatronConfig
 
-# Mirrors resources/cert.conf in the maltego-transforms repository: a localhost
-# certificate needs both the DNS name and the loopback IP as subject alt names,
-# or clients reached via 127.0.0.1 reject it.
+# Derived from the maltego-transforms repository, which carries two disagreeing configs:
+# resources/cert.conf omits digitalSignature, while resources/openssl.conf includes it.
+# Neither is referenced by SDK code — they are there to be copied — and this file was
+# originally copied from the broken one. Follow openssl.conf.
+#
+# A localhost certificate needs both the DNS name and the loopback IP as subject alt
+# names, or clients reached via 127.0.0.1 reject it. Note also that cert.conf declares
+# `req_extensions`, which `openssl req -x509` ignores; `x509_extensions` below is what
+# actually applies the v3_req section.
 #
 # keyUsage must include digitalSignature. Every TLS 1.3 suite is signature-based —
 # the server signs the handshake instead of receiving an encrypted premaster secret —
