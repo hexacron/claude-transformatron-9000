@@ -55,8 +55,11 @@ KEY_FILE = _CERTS_DIR / "key.pem"
 
 if __name__ == "__main__":
     settings = MaltegoServerSettings(
+        # Fallbacks for running this file directly. The supported way to change them is
+        # transformatron.toml at the repository root, which the CLI and MCP server pass
+        # in as MALTEGO_SERVER_* variables — those outrank whatever is written here.
         server_name="New Maltego Integration",
-        ns="acme.new_maltego_integration",  # choose acme.* here
+        ns="acme.new_maltego_integration",
         author="Acme Corp",
         # The Maltego desktop client refuses plain-HTTP transform servers, and it
         # rejects them client-side, so the server log stays empty. Generate a

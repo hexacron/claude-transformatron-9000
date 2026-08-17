@@ -466,6 +466,7 @@ docs/
   ipinfo.md                bearer auth, one response to several entities
   upstream-sdk-issue.md    draft bug report, not yet filed
 tests/           unit tests for the control plane and the scaffolder
+transformatron.toml  server name, namespace, author. Gitignored; .example is the template.
 .env             API keys for headless runs. Gitignored; .env.example is the template.
 .transformatron/ runtime state — PID, log, certs, recorded scheme. Gitignored.
 ```
@@ -550,10 +551,35 @@ check one transform with `--transform <id>`.
 
 ## Naming
 
-The generated server still identifies itself with the SDK's placeholders —
-`server_name="New Maltego Integration"`, `ns="acme.new_maltego_integration"`, `author="Acme Corp"`
-in `server/project.py`. Change these before publishing anything; the namespace becomes part of
-every transform's fully qualified ID.
+A fresh clone runs under the SDK's placeholder identity — `New Maltego Integration`,
+`acme.new_maltego_integration`, `Acme Corp`. Change it before publishing anything: the namespace
+is part of every transform's fully qualified ID, so two servers that share one collide in the
+same client.
+
+Copy the template and edit it:
+
+```bash
+cp transformatron.toml.example transformatron.toml
+```
+
+```toml
+[server]
+server_name = "Acme Threat Intel"
+namespace   = "acme.threat_intel"
+author      = "Acme Corp"
+```
+
+`transformatron.toml` is gitignored, so your identity does not travel with a fork. The CLI and
+MCP server pass these to the transform server as `MALTEGO_SERVER_*` variables, which outrank the
+values in `server/project.py` — so **you never edit `project.py` to rename a server**. Restart to
+apply, then confirm:
+
+```bash
+uv run python scripts/transformatron_cli.py restart
+uv run python scripts/transformatron_cli.py list   # ids now carry your namespace
+```
+
+The values in `server/project.py` remain as fallbacks for running that file directly.
 
 ## License
 

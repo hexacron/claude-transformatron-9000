@@ -17,6 +17,10 @@ __pycache__/
 server/transforms/local/*
 !server/transforms/local/__init__.py
 
+# Server identity. Each adopter names their own server, so the file is local and
+# transformatron.toml.example is the committed template.
+transformatron.toml
+
 # Credentials. API keys belong in the Maltego client's transform settings, or in a
 # local env file for headless testing — never in the repository.
 .env
