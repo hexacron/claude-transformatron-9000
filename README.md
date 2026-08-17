@@ -395,6 +395,7 @@ integrations** — delete whichever you do not need, along with its import in `s
 
 | Example | Shows | Key |
 |---|---|---|
+| `server/transforms/rdap/` | Registration data, no API key — pivotable output, redirect handling | no |
 | `server/transforms/examples/ffraud.py` | Single module, no API key — the minimal shape | no |
 | `server/transforms/ransomwarelive/` | Multi-module, shared client, upstream field drift | yes |
 | `server/transforms/greynoise/` | 404 as a verdict, silent key acceptance, tight quota | yes |
@@ -413,6 +414,38 @@ silently, so a successful lookup is not evidence the key is valid; HTTP 404 is a
 ("never observed scanning") rather than a failure; and the free tier allows roughly 25 lookups a
 week, which the smoke test can spend in one pass. Every one of those was found by running it, not
 by reading the documentation.
+
+### RDAP
+
+Against [RDAP](https://datatracker.ietf.org/doc/html/rfc9083), the IETF protocol that replaced
+WHOIS. Registries serve it themselves, so the data is authoritative rather than scraped, and it
+needs **no API key or registration** — these run on a fresh clone.
+
+Three transforms, all taking `maltego.Domain`:
+
+| Transform | Returns |
+|---|---|
+| RDAP: Domain to Registration | `Phrase` — registration and expiry dates, notable status, registrar |
+| RDAP: Domain to Nameservers | `DNSName` — the delegated nameservers |
+| RDAP: Domain to Abuse Contact | `EmailAddress`, `PhoneNumber` — the registrar's abuse contacts |
+
+Start here if you are learning the shape. It is the closest of the samples to real investigative
+work: nameservers shared across unrelated domains are a standard way to group infrastructure, and
+the abuse contact is where a takedown request goes.
+
+Two things it demonstrates that the simpler sample cannot:
+
+- **Following a redirect safely.** `rdap.org` holds no data; it answers with a 302 to whichever
+  registry owns the TLD. The SDK's client sets `follow_redirects=False` deliberately, because
+  following one silently would send your headers to a host the transform never chose. The hop is
+  taken explicitly, once, and only to an `https` target.
+- **Reading a response off an exception.** The client returns only 2xx and raises on everything
+  else, so that 302 arrives as `MaltegoHTTPDataProviderInvalidResponse` rather than as a response
+  you can inspect. Catching and logging it — the natural thing to write — yields zero entities and
+  still reports success. The redirect target has to come off the exception's `response`.
+
+Note that `example.com` is registered through IANA's reserved-name process and publishes no abuse
+contact, which is why the smoke test pins `python.org` for that transform.
 
 ### ffraud
 

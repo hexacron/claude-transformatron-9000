@@ -102,6 +102,11 @@ TRANSFORM_SAMPLES = {
     # California with several affirmative disclosures, so a pass exercises the populated
     # branch. Re-pin from a current CPPA listing if the registration lapses.
     "decryptads_hostname_to_data_broker": "acxiom.com",
+    # example.com is registered through IANA's reserved-name process and its registrar
+    # publishes no abuse contact, so the generic sample makes this transform look broken.
+    # python.org is registered through Gandi, which publishes both an abuse address and a
+    # phone number, exercising the populated branch of the jCard walk.
+    "rdap_domain_to_abuse_contact": "python.org",
 }
 
 # A transform reporting one of these is unconfigured, not broken. Matched

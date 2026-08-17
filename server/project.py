@@ -16,6 +16,7 @@ from transforms.ipinfo.lookup import *  # noqa: F401,F403
 from transforms.ransomwarelive.groups import *  # noqa: F401,F403
 from transforms.ransomwarelive.intel import *  # noqa: F401,F403
 from transforms.ransomwarelive.victims import *  # noqa: F401,F403
+from transforms.rdap.domain import *  # noqa: F401,F403
 
 
 def _register_local_transforms() -> list[str]:
