@@ -6,6 +6,8 @@ nothing in it is specific to one tool.
 This repository vendors the official Maltego SDK guidance under `server/.agents/skills/`. Those
 files are the source of truth for SDK API surface — entity selection, settings, pagination, input
 constraints, TRX migration.
+See `docs/upstream-sdk-comparison.md` for the latest comparison against a freshly generated
+official SDK starter.
 
 **One of their examples is wrong in a way that fails silently** — Correction 1 below, verified
 against SDK 1.0.1 at the upstream HEAD of 2026-08-10. Correction 2 is not a divergence: the SDK
