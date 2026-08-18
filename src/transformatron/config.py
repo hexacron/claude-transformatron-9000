@@ -105,20 +105,29 @@ class TransformatronConfig:
         return self.state_dir / "certs" / "key.pem"
 
 
-def _read_identity(config_file: Path) -> dict[str, str]:
-    """Read the ``[server]`` identity keys from ``transformatron.toml``.
+STRING_KEYS = ("server_name", "namespace", "author", "host")
+
+# Ports below 1024 need root on Unix, and 0 would hand out an ephemeral port the client
+# could not be told about in advance.
+MIN_PORT = 1024
+MAX_PORT = 65535
+
+
+def _read_server_table(config_file: Path) -> dict[str, str | int]:
+    """Read the ``[server]`` keys from ``transformatron.toml``.
 
     Args:
         config_file: Path to the TOML file. A missing file is not an error — the
-            defaults are the placeholders a fresh clone runs with.
+            defaults are what a fresh clone runs with.
 
     Returns:
-        The identity fields that were set, ready to pass to ``TransformatronConfig``.
+        The fields that were set, ready to pass to ``TransformatronConfig``.
 
     Raises:
-        ConfigError: If the file is present but unparseable, or a known key holds a
-            non-string. Staying silent here would publish placeholder identity under a
-            name the author believed they had changed.
+        ConfigError: If the file is present but unparseable, or a known key holds an
+            unusable value. Staying silent here would publish placeholder identity under
+            a name the author believed they had changed, or bind a port they did not ask
+            for and then report the wrong one in the seed URL.
     """
     if not config_file.is_file():
         return {}
@@ -132,28 +141,48 @@ def _read_identity(config_file: Path) -> dict[str, str]:
     if not isinstance(server, dict):
         raise ConfigError(f"{config_file}: [server] must be a table, got {type(server).__name__}.")
 
-    identity: dict[str, str] = {}
-    for key in ("server_name", "namespace", "author"):
+    settings: dict[str, str | int] = {}
+    for key in STRING_KEYS:
         if key not in server:
             continue
         value = server[key]
         if not isinstance(value, str) or not value.strip():
             raise ConfigError(f"{config_file}: [server].{key} must be a non-empty string.")
-        identity[key] = value
-    return identity
+        settings[key] = value
+
+    if "port" in server:
+        settings["port"] = _validate_port(server["port"], config_file)
+    return settings
+
+
+def _validate_port(value: object, config_file: Path) -> int:
+    """Return ``value`` as a usable TCP port, or raise ``ConfigError``.
+
+    ``bool`` is rejected explicitly because it is a subclass of ``int``, so ``port = true``
+    would otherwise bind port 1.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"{config_file}: [server].port must be a whole number, got {value!r}.")
+    if not MIN_PORT <= value <= MAX_PORT:
+        raise ConfigError(
+            f"{config_file}: [server].port must be between {MIN_PORT} and {MAX_PORT}, got {value}."
+        )
+    return value
 
 
 def load_config() -> TransformatronConfig:
     """Build the config for the server managed by this repository.
 
-    Identity comes from ``transformatron.toml`` at the repository root when present, so
-    adopting this repository does not require editing ``server/project.py``.
+    Identity and address come from ``transformatron.toml`` at the repository root when
+    present, so adopting this repository does not require editing ``server/project.py``.
     """
-    # Applied field by field rather than splatted: the file may only set identity, and a
-    # **kwargs spread would let a stray key reach port or project_dir.
-    identity = _read_identity(REPO_ROOT / CONFIG_FILE_NAME)
+    # Applied field by field rather than splatted: a **kwargs spread would let a stray key
+    # in the file reach project_dir or state_dir, which are not meant to be configurable.
+    settings = _read_server_table(REPO_ROOT / CONFIG_FILE_NAME)
     return TransformatronConfig(
-        server_name=identity.get("server_name", DEFAULT_SERVER_NAME),
-        namespace=identity.get("namespace", DEFAULT_NAMESPACE),
-        author=identity.get("author", DEFAULT_AUTHOR),
+        host=str(settings.get("host", DEFAULT_HOST)),
+        port=int(settings.get("port", DEFAULT_PORT)),
+        server_name=str(settings.get("server_name", DEFAULT_SERVER_NAME)),
+        namespace=str(settings.get("namespace", DEFAULT_NAMESPACE)),
+        author=str(settings.get("author", DEFAULT_AUTHOR)),
     )
