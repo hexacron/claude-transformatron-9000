@@ -1,8 +1,9 @@
 # Copy to `transformatron.toml` (gitignored) and edit. Without it the server runs under
 # the placeholder identity below, which is fine for trying things out and wrong to publish.
 #
-# The CLI and MCP server pass these to the transform server as MALTEGO_SERVER_* variables,
-# so changing identity never means editing server/project.py.
+# Every key is optional; the values shown are the defaults. The CLI and MCP server pass
+# these to the transform server as MALTEGO_SERVER_* variables, so changing any of them
+# never means editing server/project.py.
 
 [server]
 # Shown in the Maltego client's Transform Hub.
@@ -13,3 +14,12 @@ server_name = "New Maltego Integration"
 namespace = "acme.new_maltego_integration"
 
 author = "Acme Corp"
+
+# Interface to bind. The default reaches a Maltego client on this machine and nothing
+# else; use 0.0.0.0 only if a client on another host has to reach the server.
+host = "127.0.0.1"
+
+# Change this if something already holds 3000 — a second clone, or another service.
+# Anything from 1024 to 65535; lower ports need root. The seed URL follows this value,
+# so re-register the hub item in Maltego after changing it.
+port = 3000

@@ -6,6 +6,7 @@ import pkgutil
 from pathlib import Path
 
 from maltego.server import MaltegoServerSettings, ServerHTTPSettings, run_server
+from middleware import AuditMiddleware, AuditWriter, AuthorizationMiddleware, PolicyChecker
 
 # Reference integrations, committed to this repository as worked examples. Each one is
 # imported by name, which is the registration model documented in AGENTS.md.
@@ -75,4 +76,12 @@ if __name__ == "__main__":
         ),
     )
 
-    run_server(settings=settings)
+    run_server(
+        settings=settings,
+        # SDK-native extension points. They are no-ops until their adapters in
+        # middleware.py are swapped for real policy/audit clients.
+        transform_middlewares=[
+            AuthorizationMiddleware(PolicyChecker()),
+            AuditMiddleware(AuditWriter()),
+        ],
+    )
