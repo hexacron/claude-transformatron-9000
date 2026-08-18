@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 
 import httpx
@@ -101,6 +102,34 @@ def test_build_server_env_pins_host_port_and_scheme(config: TransformatronConfig
     assert env["MALTEGO_SERVER_HTTP_ADDR"] == config.host
     assert env["MALTEGO_SERVER_HTTP_PORT"] == str(config.port)
     assert env["MALTEGO_SERVER_PROTOCOL"] == "http"
+
+
+def test_build_server_env_carries_identity(config: TransformatronConfig) -> None:
+    """Identity reaches the server the same way host and port do, via MALTEGO_SERVER_*."""
+    named = dataclasses.replace(
+        config, server_name="Acme Intel", namespace="acme.intel", author="Acme"
+    )
+
+    env = lifecycle.build_server_env(named)
+
+    assert env["MALTEGO_SERVER_SERVER_NAME"] == "Acme Intel"
+    assert env["MALTEGO_SERVER_NS"] == "acme.intel"
+    assert env["MALTEGO_SERVER_AUTHOR"] == "Acme"
+
+
+def test_configured_identity_outranks_the_ambient_environment(
+    config: TransformatronConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale MALTEGO_SERVER_NS in the shell must not override transformatron.toml.
+
+    build_server_env copies os.environ in before setting its own keys, so an inherited
+    value would win if identity were merged in the other order — and the server would
+    register transform ids under a namespace nobody configured.
+    """
+    monkeypatch.setenv("MALTEGO_SERVER_NS", "stale.from.shell")
+    named = dataclasses.replace(config, namespace="acme.intel")
+
+    assert lifecycle.build_server_env(named)["MALTEGO_SERVER_NS"] == "acme.intel"
 
 
 def test_read_scheme_defaults_to_http(config: TransformatronConfig) -> None:

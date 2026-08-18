@@ -7,8 +7,10 @@ This repository vendors the official Maltego SDK guidance under `server/.agents/
 files are the source of truth for SDK API surface — entity selection, settings, pagination, input
 constraints, TRX migration.
 
-**Two of their examples are wrong in ways that fail silently.** Read the corrections below first,
-then use the SDK guidance for everything else.
+**One of their examples is wrong in a way that fails silently** — Correction 1 below, verified
+against SDK 1.0.1 at the upstream HEAD of 2026-08-10. Correction 2 is not a divergence: the SDK
+teaches it correctly, and it is repeated here because it is the most common way a transform lands
+in the client unusable. Read both, then use the SDK guidance for everything else.
 
 ## Correction 1: never return a `MaltegoGraph`
 
@@ -59,6 +61,9 @@ Use `-> list[A | B | C]` for multiple output types. It is published to `/api/v3/
 identically and it actually works.
 
 ## Correction 2: both annotations are load-bearing
+
+Not a divergence from the SDK — it teaches this correctly — but it is the most common way a
+transform ends up registered yet unusable, so it is worth repeating.
 
 Input type comes from the **first parameter's** annotation; output type comes from the **return**
 annotation. Both are read at registration and published to discovery.

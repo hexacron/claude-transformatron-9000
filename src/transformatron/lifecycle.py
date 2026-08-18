@@ -166,6 +166,13 @@ def build_server_env(config: TransformatronConfig, ssl: bool = False) -> dict[st
     env["MALTEGO_SERVER_HTTP_ADDR"] = config.host
     env["MALTEGO_SERVER_HTTP_PORT"] = str(config.port)
     env["MALTEGO_SERVER_PROTOCOL"] = "https" if ssl else "http"
+    # Identity travels the same way as host and port, so transformatron.toml steers the
+    # server without anyone editing project.py. Set unconditionally rather than only when
+    # it differs from the default: an inherited MALTEGO_SERVER_NS in the ambient
+    # environment would otherwise silently outrank the file the author actually wrote.
+    env["MALTEGO_SERVER_SERVER_NAME"] = config.server_name
+    env["MALTEGO_SERVER_NS"] = config.namespace
+    env["MALTEGO_SERVER_AUTHOR"] = config.author
     env["PYTHONUNBUFFERED"] = "1"
 
     if ssl:

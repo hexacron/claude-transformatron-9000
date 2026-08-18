@@ -11,9 +11,23 @@ from dataclasses import dataclass
 
 from transformatron.config import TransformatronConfig
 
-# Mirrors resources/cert.conf in the maltego-transforms repository: a localhost
-# certificate needs both the DNS name and the loopback IP as subject alt names,
-# or clients reached via 127.0.0.1 reject it.
+# Derived from the maltego-transforms repository, which carries two disagreeing configs:
+# resources/cert.conf omits digitalSignature, while resources/openssl.conf includes it.
+# Neither is referenced by SDK code — they are there to be copied — and this file was
+# originally copied from the broken one. Follow openssl.conf.
+#
+# A localhost certificate needs both the DNS name and the loopback IP as subject alt
+# names, or clients reached via 127.0.0.1 reject it. Note also that cert.conf declares
+# `req_extensions`, which `openssl req -x509` ignores; `x509_extensions` below is what
+# actually applies the v3_req section.
+#
+# keyUsage must include digitalSignature. Every TLS 1.3 suite is signature-based —
+# the server signs the handshake instead of receiving an encrypted premaster secret —
+# so a certificate offering only the encipherment bits cannot be used for the exchange
+# the Graph Browser negotiates. Chrome enforces this and fails the request with
+# ERR_SSL_KEY_USAGE_INCOMPATIBLE before CORS or any application logic is reached;
+# trusting the certificate does not help, because trust is not what is being rejected.
+# curl is laxer and accepts the encipherment-only certificate, so it does not catch this.
 CERT_CONFIG = """[req]
 default_bits = 2048
 prompt = no
@@ -24,7 +38,7 @@ x509_extensions = v3_req
 CN = localhost
 
 [v3_req]
-keyUsage = keyEncipherment, dataEncipherment
+keyUsage = digitalSignature, keyEncipherment, dataEncipherment
 extendedKeyUsage = serverAuth
 subjectAltName = @alt_names
 

@@ -96,6 +96,17 @@ TRANSFORM_SAMPLES = {
     # fixed id ages out of urlscan's retention. Left without an entry: they reject the
     # generic Phrase sample and are recorded SKIP via INVALID_SAMPLE_MARKERS. Exercise
     # them with a scan id produced by the search transform.
+    # Only a registered data broker has a registry entry, and the generic example.com
+    # sample correctly has none — the transform says so and returns nothing, which the
+    # gate cannot distinguish from a silent empty return. Acxiom is registered in
+    # California with several affirmative disclosures, so a pass exercises the populated
+    # branch. Re-pin from a current CPPA listing if the registration lapses.
+    "decryptads_hostname_to_data_broker": "acxiom.com",
+    # example.com is registered through IANA's reserved-name process and its registrar
+    # publishes no abuse contact, so the generic sample makes this transform look broken.
+    # python.org is registered through Gandi, which publishes both an abuse address and a
+    # phone number, exercising the populated branch of the jCard walk.
+    "rdap_domain_to_abuse_contact": "python.org",
 }
 
 # A transform reporting one of these is unconfigured, not broken. Matched

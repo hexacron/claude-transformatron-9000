@@ -1,0 +1,15 @@
+# Copy to `transformatron.toml` (gitignored) and edit. Without it the server runs under
+# the placeholder identity below, which is fine for trying things out and wrong to publish.
+#
+# The CLI and MCP server pass these to the transform server as MALTEGO_SERVER_* variables,
+# so changing identity never means editing server/project.py.
+
+[server]
+# Shown in the Maltego client's Transform Hub.
+server_name = "New Maltego Integration"
+
+# Prefixed to every transform id, e.g. acme.new_maltego_integration.domain_to_ip.
+# Two servers sharing a namespace collide in one client, so pick something of your own.
+namespace = "acme.new_maltego_integration"
+
+author = "Acme Corp"

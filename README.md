@@ -395,6 +395,7 @@ integrations** — delete whichever you do not need, along with its import in `s
 
 | Example | Shows | Key |
 |---|---|---|
+| `server/transforms/rdap/` | Registration data, no API key — pivotable output, redirect handling | no |
 | `server/transforms/examples/ffraud.py` | Single module, no API key — the minimal shape | no |
 | `server/transforms/ransomwarelive/` | Multi-module, shared client, upstream field drift | yes |
 | `server/transforms/greynoise/` | 404 as a verdict, silent key acceptance, tight quota | yes |
@@ -413,6 +414,38 @@ silently, so a successful lookup is not evidence the key is valid; HTTP 404 is a
 ("never observed scanning") rather than a failure; and the free tier allows roughly 25 lookups a
 week, which the smoke test can spend in one pass. Every one of those was found by running it, not
 by reading the documentation.
+
+### RDAP
+
+Against [RDAP](https://datatracker.ietf.org/doc/html/rfc9083), the IETF protocol that replaced
+WHOIS. Registries serve it themselves, so the data is authoritative rather than scraped, and it
+needs **no API key or registration** — these run on a fresh clone.
+
+Three transforms, all taking `maltego.Domain`:
+
+| Transform | Returns |
+|---|---|
+| RDAP: Domain to Registration | `Phrase` — registration and expiry dates, notable status, registrar |
+| RDAP: Domain to Nameservers | `DNSName` — the delegated nameservers |
+| RDAP: Domain to Abuse Contact | `EmailAddress`, `PhoneNumber` — the registrar's abuse contacts |
+
+Start here if you are learning the shape. It is the closest of the samples to real investigative
+work: nameservers shared across unrelated domains are a standard way to group infrastructure, and
+the abuse contact is where a takedown request goes.
+
+Two things it demonstrates that the simpler sample cannot:
+
+- **Following a redirect safely.** `rdap.org` holds no data; it answers with a 302 to whichever
+  registry owns the TLD. The SDK's client sets `follow_redirects=False` deliberately, because
+  following one silently would send your headers to a host the transform never chose. The hop is
+  taken explicitly, once, and only to an `https` target.
+- **Reading a response off an exception.** The client returns only 2xx and raises on everything
+  else, so that 302 arrives as `MaltegoHTTPDataProviderInvalidResponse` rather than as a response
+  you can inspect. Catching and logging it — the natural thing to write — yields zero entities and
+  still reports success. The redirect target has to come off the exception's `response`.
+
+Note that `example.com` is registered through IANA's reserved-name process and publishes no abuse
+contact, which is why the smoke test pins `python.org` for that transform.
 
 ### ffraud
 
@@ -466,6 +499,7 @@ docs/
   ipinfo.md                bearer auth, one response to several entities
   upstream-sdk-issue.md    draft bug report, not yet filed
 tests/           unit tests for the control plane and the scaffolder
+transformatron.toml  server name, namespace, author. Gitignored; .example is the template.
 .env             API keys for headless runs. Gitignored; .env.example is the template.
 .transformatron/ runtime state — PID, log, certs, recorded scheme. Gitignored.
 ```
@@ -550,10 +584,35 @@ check one transform with `--transform <id>`.
 
 ## Naming
 
-The generated server still identifies itself with the SDK's placeholders —
-`server_name="New Maltego Integration"`, `ns="acme.new_maltego_integration"`, `author="Acme Corp"`
-in `server/project.py`. Change these before publishing anything; the namespace becomes part of
-every transform's fully qualified ID.
+A fresh clone runs under the SDK's placeholder identity — `New Maltego Integration`,
+`acme.new_maltego_integration`, `Acme Corp`. Change it before publishing anything: the namespace
+is part of every transform's fully qualified ID, so two servers that share one collide in the
+same client.
+
+Copy the template and edit it:
+
+```bash
+cp transformatron.toml.example transformatron.toml
+```
+
+```toml
+[server]
+server_name = "Acme Threat Intel"
+namespace   = "acme.threat_intel"
+author      = "Acme Corp"
+```
+
+`transformatron.toml` is gitignored, so your identity does not travel with a fork. The CLI and
+MCP server pass these to the transform server as `MALTEGO_SERVER_*` variables, which outrank the
+values in `server/project.py` — so **you never edit `project.py` to rename a server**. Restart to
+apply, then confirm:
+
+```bash
+uv run python scripts/transformatron_cli.py restart
+uv run python scripts/transformatron_cli.py list   # ids now carry your namespace
+```
+
+The values in `server/project.py` remain as fallbacks for running that file directly.
 
 ## License
 

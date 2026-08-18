@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from transformatron.scaffold.schema import (
     OutputFieldMapping,
     infer_input_entity,
     infer_output_entity,
+    qualified_entity_type,
 )
 
 
@@ -184,7 +186,8 @@ def test_generate_service_code() -> None:
 
     lookup_code = files["lookup.py"]
     assert "from maltego.entities import AS, IPv4Address, Phrase" in lookup_code
-    assert "-> list[AS | Phrase]:" in lookup_code
+    assert "TestLookupOutput = AS | Phrase" in lookup_code
+    assert "-> list[TestLookupOutput]:" in lookup_code
     assert "target = validate_ip(input_entity.value)" in lookup_code
     assert "results.append(AS(" in lookup_code
 
@@ -431,6 +434,199 @@ def test_generated_entity_imports_are_isort_ordered() -> None:
     code = generate_transform_module(cfg, cfg.transforms[0])
 
     assert "from maltego.entities import URL, Domain, IPv4Address, Phrase" in code
+
+
+@pytest.mark.parametrize(
+    "input_entity",
+    ["IPv4Address", "IPv6Address", "Domain", "URL", "EmailAddress", "Hash", "CVE", "Phrase"],
+)
+def test_input_constraint_matches_the_input_entity(input_entity: str) -> None:
+    """Every scaffolded transform constrains itself to its own input type.
+
+    Without the constraint the Maltego client offers the transform on every entity of the
+    type, including ones the endpoint cannot serve.
+    """
+    cfg = _service_config()
+    cfg.transforms[0].input_entity = input_entity
+
+    code = generate_transform_module(cfg, cfg.transforms[0])
+
+    assert f'input_constraint=EntityTypeConstraint(entity_type="maltego.{input_entity}"),' in code
+    assert "from maltego.model.input_constraints import EntityTypeConstraint" in code
+
+
+def test_input_constraint_can_be_suppressed() -> None:
+    """Opting out emits neither the argument nor its import.
+
+    A leftover import would be an F401 failure on freshly generated code.
+    """
+    cfg = _service_config()
+    cfg.transforms[0].emit_input_constraint = False
+
+    code = generate_transform_module(cfg, cfg.transforms[0])
+
+    assert "input_constraint" not in code
+    assert "EntityTypeConstraint" not in code
+
+
+def test_generated_code_passes_the_project_lint_gate(tmp_path: Path) -> None:
+    """Generated modules must survive `ruff check` and `ruff format --check`.
+
+    `server/transforms/` is linted, so a scaffold that emits misordered imports or wrong
+    blank-line spacing hands the author a failing gate on code they have not touched. The
+    import ordering is the live risk: EntityTypeConstraint sits between the entities and
+    server imports, and the entity list itself has to match ruff's case-insensitive sort
+    (Website before WHOISRecord), which is easy to get wrong by hand.
+    """
+    wide = _service_config(service_id="wide")
+    wide.transforms[0].output_mappings = [
+        infer_output_entity(name)
+        for name in ("whois", "website", "certificate", "bitcoin", "mac_address", "name", "link")
+    ]
+
+    for cfg in (_service_config(), _service_config(service_id="authed"), wide):
+        if cfg.service_id == "authed":
+            cfg.auth_key_name = "AUTHED_API_KEY"
+        for name, code in generate_service_code(cfg).items():
+            (tmp_path / f"{cfg.service_id}_{name}").write_text(code)
+
+    for args in (["check"], ["format", "--check"]):
+        result = subprocess.run(
+            ["uv", "run", "ruff", *args, str(tmp_path)],
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).parent.parent,
+        )
+        assert result.returncode == 0, f"ruff {args[0]} failed:\n{result.stdout}\n{result.stderr}"
+
+
+@pytest.mark.parametrize(
+    ("class_name", "expected"),
+    [
+        ("Domain", "maltego.Domain"),
+        ("IPv4Address", "maltego.IPv4Address"),
+        # The "maltego." + ClassName rule breaks for 72 of the 244 exported entities.
+        ("AffiliationTwitter", "maltego.affiliation.Twitter"),
+        ("STIX2attackpattern", "maltego.STIX2.attack-pattern"),
+        ("Hashtag", "maltego.hashtag"),
+    ],
+)
+def test_qualified_entity_type_reads_the_class(class_name: str, expected: str) -> None:
+    """TYPE_NAME comes off the class, because it is not always derivable from the name."""
+    assert qualified_entity_type(class_name) == expected
+
+
+def test_qualified_entity_type_rejects_unknown_names() -> None:
+    """A name that is not an entity class fails loudly rather than emitting a bad type."""
+    with pytest.raises(ValueError, match="not an entity class"):
+        qualified_entity_type("NotAnEntity")
+
+
+@pytest.mark.parametrize(
+    ("field_name", "entity_type"),
+    [
+        ("name", "Person"),
+        ("company", "Company"),
+        ("phone", "PhoneNumber"),
+        ("username", "Alias"),
+        ("avatar", "Image"),
+        ("mac_address", "MacAddress"),
+        ("port", "Port"),
+        ("bitcoin", "BTCAddress"),
+        ("wallet", "CryptocurrencyAddress"),
+        ("website", "Website"),
+        ("malware", "Malware"),
+        ("certificate", "X509Certificate"),
+        ("whois", "WHOISRecord"),
+    ],
+)
+def test_widened_output_entities(field_name: str, entity_type: str) -> None:
+    """Common response fields map to pivotable entities rather than falling back to Phrase.
+
+    A Phrase renders as text an investigator cannot pivot from, so every field left
+    unmapped is a dead end in the graph.
+    """
+    assert infer_output_entity(field_name).entity_type == entity_type
+
+
+def test_org_still_maps_to_isp() -> None:
+    """`org` stays with ISP: on IP-lookup APIs it is the network operator, not a company."""
+    assert infer_output_entity("org").entity_type == "ISP"
+
+
+def test_many_output_entities_stay_within_the_line_limit() -> None:
+    """A response mapping many entity types must not emit over-long imports or unions.
+
+    Both the entity import and the output union grow with the number of mapped fields, and
+    either one crossing 100 characters fails E501 on freshly generated code.
+    """
+    cfg = _service_config()
+    cfg.transforms[0].output_mappings = [
+        infer_output_entity(name)
+        for name in (
+            "name",
+            "company",
+            "phone",
+            "username",
+            "avatar",
+            "mac_address",
+            "port",
+            "bitcoin",
+            "wallet",
+            "website",
+            "malware",
+            "certificate",
+            "whois",
+        )
+    ]
+
+    code = generate_transform_module(cfg, cfg.transforms[0])
+
+    assert all(len(line) <= 100 for line in code.splitlines())
+    # The union is named once rather than inlined at both use sites.
+    assert "CustomLookupOutput = (" in code
+    assert "-> list[CustomLookupOutput]:" in code
+
+
+@pytest.mark.parametrize("count", range(1, 15))
+def test_output_alias_matches_ruff_at_every_width(count: int, tmp_path: Path) -> None:
+    """The alias must be formatted the way ruff would at any number of output types.
+
+    Wrapping earlier or later than the formatter is not cosmetic: ruff rewrites the file
+    and `ruff format --check` then fails on code the author has not touched. The boundary
+    between the three layouts is the part worth pinning.
+    """
+    pool = [
+        "URL",
+        "Alias",
+        "BTCAddress",
+        "City",
+        "Company",
+        "CryptocurrencyAddress",
+        "Image",
+        "MacAddress",
+        "Malware",
+        "Person",
+        "PhoneNumber",
+        "Port",
+        "WHOISRecord",
+        "X509Certificate",
+    ]
+    cfg = _service_config(service_id=f"w{count}")
+    cfg.transforms[0].output_mappings = [
+        OutputFieldMapping(field_name=f"f{i}", entity_type=t) for i, t in enumerate(pool[:count])
+    ]
+
+    for name, code in generate_service_code(cfg).items():
+        (tmp_path / name).write_text(code)
+
+    result = subprocess.run(
+        ["uv", "run", "ruff", "format", "--check", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).parent.parent,
+    )
+    assert result.returncode == 0, f"{count} output types:\n{result.stdout}"
 
 
 def test_operations_scaffold_validation(tmp_path: Path) -> None:
