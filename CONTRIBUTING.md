@@ -149,8 +149,9 @@ regression test, confirm it fails against the bug before you call it done.
 
 Honest about what has not been exercised:
 
-- Verified on macOS only. Linux should work but is untested; the certificate trust command in the
-  README is macOS-specific.
+- The test suite and a live server run are verified on macOS and Linux (see `.github/workflows/`).
+  The Maltego desktop client has only been exercised on macOS, and the certificate trust command
+  in the README is macOS-specific.
 - Windows is not supported. `_pid_is_alive` probes with `os.kill(pid, 0)`, which on Windows
   terminates the process instead of testing it, and `stop` relies on `SIGKILL`, which Windows does
   not define.
