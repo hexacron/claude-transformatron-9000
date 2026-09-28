@@ -88,10 +88,12 @@ async def fetch(
         return None
 
     try:
+        # Bearer header rather than the ?token= query parameter IPinfo also accepts: httpx
+        # logs every request URL at INFO, so a query-string token would land in server.log.
         response = await client.get(
             f"{BASE_URL}/{ip}",
             context=context,
-            params={"token": token},
+            headers={"Authorization": f"Bearer {token}"},
         )
     except MaltegoHTTPDataProviderNotFound:
         context.log.inform("No IPinfo record for the requested address")
@@ -101,7 +103,11 @@ async def fetch(
         context.log.fatal(f"IPinfo lookup failed: {exc.message}")
         return None
 
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError:
+        context.log.fatal("IPinfo returned a non-JSON response")
+        return None
     if not isinstance(data, dict):
         context.log.fatal("IPinfo returned an unexpected response shape")
         return None

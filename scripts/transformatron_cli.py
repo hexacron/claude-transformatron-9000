@@ -14,17 +14,24 @@ Usage:
     uv run python scripts/transformatron_cli.py logs --lines 100
     uv run python scripts/transformatron_cli.py certs
     uv run python scripts/transformatron_cli.py seed-url
+
+Exit status is 0 when the operation did what was asked and 1 when it failed: a failed
+start, stop, or restart, a server that is unreachable or unhealthy, a transform run that
+ended in a state other than success, a failed scaffold or certificate generation, or an
+unusable ``transformatron.toml``. A successful run that returned zero entities exits 0;
+read the entity count in the output.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 from collections.abc import Coroutine
 from typing import Any
 
 from transformatron import operations
-from transformatron.config import load_config
+from transformatron.config import ConfigError, load_config
 
 
 def _resolve(value: Coroutine[Any, Any, str]) -> str:
@@ -90,8 +97,19 @@ def build_parser() -> argparse.ArgumentParser:
     scaffold = sub.add_parser("scaffold", help="Scaffold a new transform from cURL or OpenAPI")
     scaffold.add_argument("--service", help="Service name slug (e.g. greynoise)")
     scaffold.add_argument("--curl", help="cURL command string")
-    scaffold.add_argument("--openapi", help="OpenAPI/Swagger JSON spec: a file path or the JSON")
-    scaffold.add_argument("--sample-response", help="Sample JSON response string")
+    scaffold.add_argument(
+        "--openapi", help="OpenAPI/Swagger JSON spec: a URL, a file path, or the JSON itself"
+    )
+    scaffold.add_argument("--sample-response", help="Sample JSON response (cURL only)")
+    scaffold.add_argument(
+        "--operation",
+        action="append",
+        metavar="OPERATION_ID",
+        help="Scaffold only this OpenAPI operation; repeat for more. Required for POST.",
+    )
+    scaffold.add_argument(
+        "--force", action="store_true", help="Overwrite an existing service directory"
+    )
 
     return parser
 
@@ -138,14 +156,22 @@ def dispatch(args: argparse.Namespace) -> str:
                 curl=args.curl,
                 openapi=args.openapi,
                 sample_response=args.sample_response,
+                operations=args.operation,
+                force=args.force,
             )
     raise SystemExit(f"Unknown command: {args.command}")
 
 
 def main() -> int:
+    """Run one command, print its output, and return the process exit status."""
     args = build_parser().parse_args()
-    print(dispatch(args))
-    return 0
+    try:
+        output = dispatch(args)
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(output)
+    return 1 if isinstance(output, operations.Failure) else 0
 
 
 if __name__ == "__main__":

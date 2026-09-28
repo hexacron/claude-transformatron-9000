@@ -1,10 +1,11 @@
 # Ensure transforms are discovered: add an import per module under transforms/.
 # The server only registers what this file imports.
 
-import importlib
-import pkgutil
+import logging
 from pathlib import Path
 
+from discovery import discover_local_transforms
+from maltego.config import get_logging_config
 from maltego.server import MaltegoServerSettings, ServerHTTPSettings, run_server
 from middleware import AuditMiddleware, AuditWriter, AuthorizationMiddleware, PolicyChecker
 
@@ -19,35 +20,13 @@ from transforms.ransomwarelive.intel import *  # noqa: F401,F403
 from transforms.ransomwarelive.victims import *  # noqa: F401,F403
 from transforms.rdap.domain import *  # noqa: F401,F403
 
+# Integrations under the gitignored transforms/local/ are discovered, not imported by name:
+# packages and single-file modules both load. See discovery.py for the rules.
+_LOCAL_MODULES = discover_local_transforms(
+    Path(__file__).resolve().parent / "transforms" / "local", "transforms.local"
+)
 
-def _register_local_transforms() -> list[str]:
-    """Import every module under ``transforms/local/``, if that directory exists.
-
-    ``transforms/local/`` is gitignored: it is where integrations that should not be
-    published live. It is discovered rather than imported by name because a fresh clone
-    does not have it, and a missing static import would stop the server booting.
-
-    Returns:
-        The dotted names of the modules imported, for the startup log.
-    """
-    local_dir = Path(__file__).resolve().parent / "transforms" / "local"
-    if not local_dir.is_dir():
-        return []
-
-    imported: list[str] = []
-    for package in sorted(p for p in local_dir.iterdir() if (p / "__init__.py").is_file()):
-        for module in pkgutil.iter_modules([str(package)]):
-            # api.py holds shared client helpers and registers no transforms; importing
-            # it directly is harmless but pointless, and it is imported by its siblings.
-            if module.name in ("api", "__init__"):
-                continue
-            dotted = f"transforms.local.{package.name}.{module.name}"
-            importlib.import_module(dotted)
-            imported.append(dotted)
-    return imported
-
-
-_LOCAL_MODULES = _register_local_transforms()
+log = logging.getLogger(__name__)
 
 # Written by `transformatron_cli.py certs`. Kept in step with
 # TransformatronConfig.cert_file / .key_file, which resolve to the same paths.
@@ -75,6 +54,13 @@ if __name__ == "__main__":
             cors_allowed_origins=["https://app.maltego.com"]
         ),
     )
+
+    # run_server configures logging itself, but only once called, and it then blocks. The
+    # same config is applied here first so the discovery line reaches server.log; a local
+    # transform that never appears in the client is otherwise hard to tell from one that
+    # was never loaded.
+    get_logging_config(settings.log_level.upper())
+    log.info("Local transforms loaded: %s", ", ".join(_LOCAL_MODULES) or "none")
 
     run_server(
         settings=settings,

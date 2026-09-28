@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -419,7 +420,7 @@ def test_openapi_path_parameter_is_not_turned_into_a_query_param() -> None:
     code = generate_transform_module(cfg, cfg.transforms[0])
 
     assert 'path = f"/api/v1/hostname/{target}"' in code
-    assert "params = None" in code
+    assert "params=" not in code
 
 
 def test_generated_entity_imports_are_isort_ordered() -> None:
@@ -730,6 +731,9 @@ def test_colliding_transform_ids_are_all_generated() -> None:
     assert "async def do_scan_2(" in files["do_scan_2.py"]
 
 
+_QUERY_Q = {"name": "q", "in": "query", "required": True}
+
+
 def test_generate_service_code_does_not_mutate_config() -> None:
     """Deduplicating filenames must not rewrite the caller's transform ids."""
     cfg = parse_openapi_spec(
@@ -738,8 +742,8 @@ def test_generate_service_code_does_not_mutate_config() -> None:
             "info": {"title": "Dup2", "version": "1.0.0"},
             "servers": [{"url": "https://dup2.example"}],
             "paths": {
-                "/a": {"get": {"operationId": "x y", "parameters": [], "responses": {}}},
-                "/b": {"get": {"operationId": "x-y", "parameters": [], "responses": {}}},
+                "/a": {"get": {"operationId": "x y", "parameters": [_QUERY_Q], "responses": {}}},
+                "/b": {"get": {"operationId": "x-y", "parameters": [_QUERY_Q], "responses": {}}},
             },
         },
         service_name="dup2",
@@ -773,3 +777,411 @@ def test_scaffold_reports_malformed_openapi_spec(tmp_path: Path) -> None:
     result = operations.scaffold(config, service="broken", openapi="{not json at all")
 
     assert "Failed to scaffold" in result
+
+
+def test_scaffold_force_overwrites_an_existing_service(tmp_path: Path) -> None:
+    """The overwrite escape hatch the clash message points at is reachable from the front end."""
+    config = TransformatronConfig(project_dir=tmp_path / "server", state_dir=tmp_path / "state")
+    config.project_dir.mkdir(parents=True)
+    curl = "curl https://api.threat.com/v1/domain/example.com"
+    operations.scaffold(config, service="threat", curl=curl)
+    lookup = config.project_dir / "transforms" / "threat" / "lookup.py"
+    lookup.write_text("# hand-written\n")
+
+    result = operations.scaffold(config, service="threat", curl=curl, force=True)
+
+    assert "Scaffolded" in result
+    assert not lookup.read_text().startswith("# hand-written")
+
+
+@pytest.mark.parametrize("name", ["../escape", "a/b", "1abc", "class", "with space"])
+def test_service_names_that_cannot_be_packages_are_rejected(name: str) -> None:
+    """The service id becomes a directory and a dotted import; a bad one breaks startup."""
+    with pytest.raises(ValueError, match=r"not usable|Could not derive"):
+        parse_curl_command("curl https://api.x.example/ip/8.8.8.8", service_name=name)
+
+
+def test_hyphenated_service_name_becomes_a_package_name() -> None:
+    cfg = parse_curl_command("curl https://api.x.example/ip/8.8.8.8", service_name="my-svc")
+
+    assert cfg.service_id == "my_svc"
+
+
+def test_curl_without_credentials_scaffolds_a_keyless_client() -> None:
+    """A public API must not be gated on a key the request never sent."""
+    cfg = parse_curl_command("curl https://internetdb.shodan.io/8.8.8.8")
+
+    assert cfg.auth_key_name is None
+    assert "API_KEY" not in generate_api_module(cfg)
+
+
+def test_key_in_the_query_string_is_auth_not_input() -> None:
+    cfg = parse_curl_command("curl 'https://api.q.example/lookup?apikey=abc&ip=1.1.1.1'")
+    transform = cfg.transforms[0]
+
+    assert (cfg.auth_type, cfg.auth_query_param) == ("query", "apikey")
+    assert (transform.input_location, transform.input_param_name) == ("query", "ip")
+    assert "apikey" not in transform.query_params
+
+
+def test_resource_names_in_the_path_are_not_taken_for_domains() -> None:
+    """`lookup.json` matches the domain pattern but is the endpoint, not the input."""
+    cfg = parse_curl_command("curl https://api.x.example/v2/lookup.json/8.8.8.8")
+
+    assert cfg.transforms[0].endpoint_path == "/v2/lookup.json/{target}"
+    assert cfg.transforms[0].input_entity == "IPv4Address"
+
+
+def test_sample_response_that_is_not_json_is_reported() -> None:
+    with pytest.raises(ValueError, match="not valid JSON"):
+        parse_curl_command("curl https://api.x.example/ip/8.8.8.8", sample_response="<html>")
+
+
+def _two_operation_spec() -> dict[str, Any]:
+    ok = {"200": {"content": {"application/json": {"schema": {"type": "object"}}}}}
+    return {
+        "openapi": "3.0.0",
+        "info": {"title": "Two", "version": "1"},
+        "servers": [{"url": "https://two.example"}],
+        "paths": {
+            "/things/{id}": {
+                "get": {
+                    "operationId": "getThing",
+                    "parameters": [{"name": "id", "in": "path", "required": True}],
+                    "responses": ok,
+                }
+            },
+            "/things": {
+                "post": {
+                    "operationId": "createThing",
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["owner"],
+                                    "properties": {
+                                        "domain": {"type": "string"},
+                                        "owner": {"type": "string", "example": "me"},
+                                        "note": {"type": "string"},
+                                    },
+                                }
+                            }
+                        }
+                    },
+                    "responses": ok,
+                }
+            },
+        },
+    }
+
+
+def test_post_operations_are_skipped_unless_named() -> None:
+    """A POST may create or change data upstream, so scaffolding one is a deliberate choice."""
+    cfg = parse_openapi_spec(_two_operation_spec())
+
+    assert [t.transform_id for t in cfg.transforms] == ["get_thing"]
+    assert any("createThing" in note for note in cfg.notes)
+
+
+def test_named_post_operation_is_scaffolded_with_its_body() -> None:
+    cfg = parse_openapi_spec(_two_operation_spec(), operations=["createThing"])
+    [transform] = cfg.transforms
+
+    assert transform.http_method == "POST"
+    assert (transform.input_location, transform.input_param_name) == ("body", "domain")
+    # Required fields ride along with their example; optional ones are left out.
+    assert transform.request_body is not None
+    assert set(transform.request_body) == {"domain", "owner"}
+    assert transform.request_body["owner"] == "me"
+
+
+def test_unknown_operation_name_is_an_error() -> None:
+    with pytest.raises(ValueError, match="deleteEverything"):
+        parse_openapi_spec(_two_operation_spec(), operations=["deleteEverything"])
+
+
+def test_operation_whose_path_cannot_be_filled_is_skipped_with_a_reason() -> None:
+    spec = _two_operation_spec()
+    spec["paths"]["/zones/{zone}/hosts"] = {
+        "get": {
+            "operationId": "listHosts",
+            "parameters": [
+                {"name": "zone", "in": "path", "required": True},
+                {"name": "ip", "in": "query", "required": True},
+            ],
+        }
+    }
+
+    cfg = parse_openapi_spec(spec)
+
+    assert "list_hosts" not in [t.transform_id for t in cfg.transforms]
+    assert any("listHosts" in note and "{zone}" in note for note in cfg.notes)
+
+
+def test_unsupported_auth_is_reported_instead_of_guessed() -> None:
+    spec = _two_operation_spec()
+    spec["components"] = {"securitySchemes": {"oauth": {"type": "oauth2"}}}
+
+    cfg = parse_openapi_spec(spec)
+
+    assert cfg.auth_key_name is None
+    assert any("oauth2" in note for note in cfg.notes)
+
+
+def test_generated_code_from_hostile_spec_text_passes_the_lint_gate(tmp_path: Path) -> None:
+    """Quotes, braces, backslashes and docstring terminators in a spec stay inert.
+
+    Each of these once went into the generated source verbatim, where it either broke the
+    module (and with it the server's startup import) or ran as code.
+    """
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": 'Evil "API" {x}', "version": "1"},
+        "servers": [{"url": "https://evil.example"}],
+        "paths": {
+            "/a": {
+                "get": {
+                    "operationId": "lookUp",
+                    "summary": "Say \"hi\" \\ {braces} ''' and more text that runs on for a while",
+                    "description": 'Ends with a quote """ and a backslash \\',
+                    "parameters": [{"name": "q", "in": "query", "required": True}],
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "example": {"a-b": 1, 'c"d': "x", "{e}": [{"f-g": "h"}]}
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        },
+    }
+    cfg = parse_openapi_spec(spec, service_name="evil")
+    for name, code in generate_service_code(cfg).items():
+        compile(code, name, "exec")
+        (tmp_path / name).write_text(code)
+
+    for args in (["check"], ["format", "--check"]):
+        result = subprocess.run(
+            ["uv", "run", "ruff", *args, str(tmp_path)],
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).parent.parent,
+        )
+        assert result.returncode == 0, f"ruff {args[0]} failed:\n{result.stdout}\n{result.stderr}"
+
+
+def _ruff_gate(directory: Path) -> None:
+    for args in (["check"], ["format", "--check"]):
+        result = subprocess.run(
+            ["uv", "run", "ruff", *args, str(directory)],
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).parent.parent,
+        )
+        assert result.returncode == 0, f"ruff {args[0]} failed:\n{result.stdout}\n{result.stderr}"
+
+
+def test_generated_code_passes_the_lint_gate_at_the_edges(tmp_path: Path) -> None:
+    """Long names, long keys, non-finite numbers and typographic text all stay lint-clean.
+
+    Each of these once produced a module that failed `ruff check` or `ruff format --check`,
+    and the non-finite float one a module that could not even be imported.
+    """
+    long_key = "an_unusually_long_response_field_name_that_real_apis_do_sometimes_return"
+    configs = [
+        # A long service id overflows the `from transforms.<svc>.api import ...` line.
+        parse_curl_command(
+            "curl -H 'X-Api-Key: abc' 'https://api.x.example/v2/lookup/8.8.8.8'",
+            {"ip": "8.8.8.8", "tags": ["a"], long_key: "x", "nested": {long_key: "y"}},
+            service_name="a_rather_long_service_identifier",
+        ),
+        # NaN and Infinity are accepted by json.loads and must not become bare names.
+        parse_curl_command(
+            'curl https://api.nums.example/q -d \'{"ip": "8.8.8.8", "n": NaN, "big": 1e999}\''
+        ),
+        parse_openapi_spec(
+            {
+                "openapi": "3.0.0",
+                "info": {"title": "Acme\u2019s Threat Intelligence Platform \u2013 v1"},
+                "servers": [{"url": "https://acme.example"}],
+                "paths": {
+                    "/ports": {
+                        "get": {
+                            "operationId": "listPorts",
+                            "summary": "List all ports that the platform is crawling on the "
+                            "Internet \u2013 the user\u2019s view",
+                            "parameters": [{"name": "q", "in": "query", "required": True}],
+                        }
+                    }
+                },
+            }
+        ),
+    ]
+    for index, cfg in enumerate(configs):
+        for name, code in generate_service_code(cfg).items():
+            compile(code, name, "exec")
+            (tmp_path / f"c{index}_{name}").write_text(code)
+
+    _ruff_gate(tmp_path)
+
+
+def test_non_finite_body_values_survive_as_floats(tmp_path: Path) -> None:
+    cfg = parse_curl_command(
+        'curl https://api.nums.example/q -d \'{"ip": "8.8.8.8", "n": NaN, "big": 1e999}\''
+    )
+    namespace: dict[str, object] = {}
+    body_line = next(
+        line.strip()
+        for line in generate_service_code(cfg)["lookup.py"].splitlines()
+        if line.strip().startswith("body = ")
+    )
+
+    exec(body_line, {"target": "1.1.1.1"}, namespace)
+
+    body = namespace["body"]
+    assert isinstance(body, dict)
+    assert body["big"] == float("inf")
+    assert body["n"] != body["n"]  # NaN
+
+
+def _shodan_like_spec(**extra: Any) -> dict[str, Any]:
+    """A spec that declares no scheme and lists its key as a query param on every operation."""
+    key = {"name": "key", "in": "query", "required": True, "example": "YOUR_API_KEY"}
+    return {
+        "openapi": "3.0.0",
+        "info": {"title": "Shodanish"},
+        "servers": [{"url": "https://api.shodanish.example"}],
+        "paths": {
+            "/host/{ip}": {
+                "get": {
+                    "operationId": "hostInformation",
+                    "parameters": [key, {"name": "ip", "in": "path", "required": True}],
+                }
+            },
+            "/host/search": {
+                "get": {
+                    "operationId": "searchHost",
+                    "parameters": [
+                        key,
+                        {"name": "query", "in": "query", "required": True, "example": "port:22"},
+                    ],
+                }
+            },
+        },
+        **extra,
+    }
+
+
+def test_key_declared_as_a_query_parameter_is_treated_as_auth() -> None:
+    """Otherwise the placeholder key is sent verbatim, or the key becomes the input."""
+    cfg = parse_openapi_spec(_shodan_like_spec())
+    by_id = {t.transform_id: t for t in cfg.transforms}
+
+    assert (cfg.auth_type, cfg.auth_query_param) == ("query", "key")
+    assert cfg.auth_key_name == "SHODANISH_API_KEY"
+    assert "key" not in by_id["host_information"].query_params
+    assert by_id["search_host"].input_param_name == "query"
+    assert "key" not in by_id["search_host"].query_params
+
+
+def test_key_like_parameter_on_only_some_operations_stays_data() -> None:
+    """A pagination `token` on one endpoint is not the credential."""
+    spec = _shodan_like_spec()
+    for item in spec["paths"].values():
+        item["get"]["parameters"] = item["get"]["parameters"][1:]
+    spec["paths"]["/host/search"]["get"]["parameters"].append({"name": "token", "in": "query"})
+
+    cfg = parse_openapi_spec(spec)
+
+    assert cfg.auth_key_name is None
+
+
+def test_operation_named_api_does_not_replace_the_shared_client() -> None:
+    spec = _two_operation_spec()
+    spec["paths"]["/other"] = {
+        "get": {"operationId": "API", "parameters": [{"name": "q", "in": "query"}]}
+    }
+
+    files = generate_service_code(parse_openapi_spec(spec))
+
+    assert "async def fetch(" in files["api.py"]
+    assert "async def api_2(" in files["api_2.py"]
+
+
+def test_search_term_beats_the_resource_path_segment() -> None:
+    """`/search?q=hello&limit=5` searches for the input, not for "hello" at /{input}."""
+    transform = parse_curl_command(
+        "curl 'https://api.x.example/search?q=hello&limit=5'"
+    ).transforms[0]
+
+    assert (transform.input_location, transform.input_param_name) == ("query", "q")
+    assert transform.endpoint_path == "/search"
+
+
+def test_lone_numeric_query_parameter_is_still_the_input() -> None:
+    transform = parse_curl_command("curl 'https://api.x.example/lookup?id=12345'").transforms[0]
+
+    assert (transform.input_location, transform.input_param_name) == ("query", "id")
+
+
+def test_swagger2_body_and_form_parameters_carry_the_input() -> None:
+    ok = {"200": {"schema": {"type": "object"}}}
+    spec = {
+        "swagger": "2.0",
+        "info": {"title": "Old"},
+        "host": "old.example",
+        "paths": {
+            "/scan": {
+                "post": {
+                    "operationId": "scan",
+                    "parameters": [
+                        {
+                            "name": "body",
+                            "in": "body",
+                            "schema": {
+                                "type": "object",
+                                "required": ["ip"],
+                                "properties": {"ip": {"type": "string"}},
+                            },
+                        }
+                    ],
+                    "responses": ok,
+                }
+            },
+            "/lookup": {
+                "post": {
+                    "operationId": "lookup",
+                    "parameters": [
+                        {"name": "domain", "in": "formData", "type": "string", "required": True}
+                    ],
+                    "responses": ok,
+                }
+            },
+        },
+    }
+
+    by_id = {
+        t.transform_id: t
+        for t in parse_openapi_spec(spec, operations=["scan", "lookup"]).transforms
+    }
+
+    scan, lookup = by_id["scan"], by_id["lookup"]
+    assert (scan.input_location, scan.input_param_name, scan.body_encoding) == (
+        "body",
+        "ip",
+        "json",
+    )
+    assert (lookup.input_location, lookup.input_param_name, lookup.body_encoding) == (
+        "body",
+        "domain",
+        "form",
+    )
+
+
+def test_rejected_service_name_is_the_one_the_caller_passed() -> None:
+    with pytest.raises(ValueError, match="'class'"):
+        parse_curl_command("curl https://api.x.example/ip/8.8.8.8", service_name="class")

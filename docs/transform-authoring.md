@@ -78,25 +78,45 @@ async def my_transform(input_entity: IPv4Address, context: MaltegoContext) -> li
 
 ## The loop
 
-1. Add or edit a module under `server/transforms/`.
-   - For new APIs, use `scaffold_transform` (MCP) or `uv run python scripts/transformatron_cli.py scaffold --curl "..."`
-     to automatically generate the validated `api.py` and transform modules.
+1. Scaffold a module package from a spec, or add or edit a module under `server/transforms/`
+   by hand. `scaffold` (CLI) and `scaffold_transform` (MCP) write the validated `api.py`, one
+   module per transform, and the `project.py` import:
+
+   ```bash
+   # From a cURL command. A real response lets it infer outputs instead of leaving a placeholder.
+   uv run python scripts/transformatron_cli.py scaffold \
+     --curl 'curl https://internetdb.shodan.io/8.8.8.8' \
+     --sample-response "$(curl -s https://internetdb.shodan.io/8.8.8.8)"
+
+   # From an OpenAPI spec, by URL or path. POST operations are skipped unless named with
+   # --operation, because they may create or change data.
+   uv run python scripts/transformatron_cli.py scaffold --service demo \
+     --openapi ./demo-openapi.json --operation searchHosts
+   ```
+
+   An existing service is refused unless you pass `--force`, which rewrites the generated files
+   and any hand corrections in them.
 2. **Import it in `server/project.py`** — `from transforms.my_module import *`, alongside the
-   existing imports at the top of the file. (The scaffolder does this automatically).
-   The server only registers what `project.py` imports.
+   existing imports at the top of the file. The scaffolder does this for you. The server only
+   registers what `project.py` imports.
 3. Restart the server — this is the reload path.
 4. Confirm it registered with the right input/output types.
-5. Run it against a real input.
+5. Run it against a real input and check the entity count (see below).
+6. Delete the output fields nobody needs and fix the mapping wherever the live response
+   disagrees with the spec — a scaffold maps every field it can see. Go back to step 3.
 
 Steps 1 and 3–5 work two ways. With an agent that has the `transformatron` MCP server configured
-(currently Claude Code — see `AGENTS.md`), use the `scaffold_transform`, `server_restart`, `list_transforms`, and
-`run_transform` tools. Otherwise use the CLI, which is what those tools call:
+(currently Claude Code — see `AGENTS.md`), use the `scaffold_transform`, `server_restart`,
+`list_transforms`, and `run_transform` tools. Otherwise use the CLI, which calls the same code:
 
 ```bash
 uv run python scripts/transformatron_cli.py restart
 uv run python scripts/transformatron_cli.py list
 uv run python scripts/transformatron_cli.py run <transform-id> maltego.IPv4Address 8.8.8.8
 ```
+
+The CLI exits 1 when a run does not end in a success state, but a run that completes with zero
+entities exits 0 — the exit code cannot stand in for reading the count.
 
 ## Verification gate
 
@@ -147,8 +167,8 @@ focused skill per task. Load one at a time; load its `references/` only when nee
 | TRX migration | `maltego-trx-migration-planner` → `-implementer` |
 
 **Port correction:** those skills default to port **8080** in their curl examples and scripts. This
-project runs on **3000**. Pass `--port 3000`, or use the `transformatron` MCP tools, which already
-target the right port and scheme.
+project runs on **3000** unless `transformatron.toml` sets another. Pass `--port` with your port,
+or use the `transformatron` MCP tools, which already target the right port and scheme.
 
 ## Worked example
 
@@ -212,24 +232,29 @@ overrides both.
 
 `.env` is gitignored; `.env.example` is the committed template and must never hold a real key.
 
-**A wrong key can be worse than no key.** urlscan answers HTTP 400 for an `api-key` header it does
-not recognise, including on endpoints that work fine anonymously — so a placeholder left in `.env`
-breaks transforms that would otherwise pass. Leave a key blank rather than filling it with
-something fake.
+**A wrong key can be worse than no key.** Some APIs reject a key they do not recognise even on
+endpoints that work fine anonymously — urlscan, for one, answers HTTP 400 to an unrecognised
+`api-key` header — so a placeholder left in `.env` can break a transform that would otherwise
+pass. Leave a key blank rather than filling it with something fake.
 
 ## Keeping an integration out of the repository
 
 Anything under `server/transforms/local/` is gitignored and discovered at server start by
-`_register_local_transforms` in `server/project.py`. Use it for integrations that should not be
-published; the committed packages alongside it are reference examples and stay imported by name.
+`discover_local_transforms` in `server/discovery.py`, which `server/project.py` calls. Use it for
+integrations that should not be published; the committed packages alongside it are reference
+examples and stay imported by name.
 
 ```
-server/transforms/local/<service>/{__init__,api,<transform>}.py
+server/transforms/local/<service>/{__init__,api,<transform>}.py   # a package
+server/transforms/local/<transform>.py                            # or a single module
 ```
 
-Discovery imports every module in each package except `api.py`, so no `project.py` edit is needed
-— which also means the usual "did you add the import?" failure does not apply there. A clone
-without the directory still boots, and only `local/__init__.py` is tracked.
+Discovery imports every module in each package except `api.py`, plus every single-file module
+directly under `local/`. Names starting with `_` are skipped at either level. No `project.py` edit
+is needed — which also means the usual "did you add the import?" failure does not apply there.
+Instead, the server log records what was loaded at startup (`Local transforms loaded: ...`); a
+module missing from that line was not picked up. A clone without private modules still boots, and
+only `local/__init__.py` is tracked.
 
 ## Security
 

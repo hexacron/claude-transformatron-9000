@@ -15,9 +15,10 @@ Usage:
     uv run python scripts/smoke_test_transforms.py --setting API_KEY=xxx
 
 Credentials are read from ``.env`` at the repository root, so a key written there once is
-picked up by every run. An explicit ``--setting KEY=VALUE`` overrides the file for that
-run. A transform that still reports a missing setting is recorded as SKIP rather than
-FAIL, so an unconfigured credential is never mistaken for broken code.
+picked up by every run. A key exported in the shell overrides the file, as it does for the
+server, and an explicit ``--setting KEY=VALUE`` overrides both for that run. A transform
+that still reports a missing setting is recorded as SKIP rather than FAIL, so an
+unconfigured credential is never mistaken for broken code.
 
 The server must already be running. Transforms calling third-party APIs make live
 network requests, so a failure here can mean an upstream outage rather than broken
@@ -28,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from dataclasses import dataclass
 from typing import Any
@@ -89,19 +91,6 @@ TRANSFORM_SAMPLES = {
     # sample takes. If it ages out of the dataset the transform still passes on the
     # negative verdict; re-pin from a current GreyNoise listing to keep the coverage.
     "greynoise_ip_reputation": "185.220.101.1",
-    # The generic "example" Phrase sample matches nothing on urlscan; a domain query
-    # exercises the search syntax the transform is built around.
-    "urlscan_search": "domain:github.com",
-    # The urlscan scan transforms take a UUID, which has no useful generic sample — any
-    # fixed id ages out of urlscan's retention. Left without an entry: they reject the
-    # generic Phrase sample and are recorded SKIP via INVALID_SAMPLE_MARKERS. Exercise
-    # them with a scan id produced by the search transform.
-    # Only a registered data broker has a registry entry, and the generic example.com
-    # sample correctly has none — the transform says so and returns nothing, which the
-    # gate cannot distinguish from a silent empty return. Acxiom is registered in
-    # California with several affirmative disclosures, so a pass exercises the populated
-    # branch. Re-pin from a current CPPA listing if the registration lapses.
-    "decryptads_hostname_to_data_broker": "acxiom.com",
     # example.com is registered through IANA's reserved-name process and its registrar
     # publishes no abuse contact, so the generic sample makes this transform look broken.
     # python.org is registered through Gandi, which publishes both an abuse address and a
@@ -130,14 +119,22 @@ NO_MATCH_MARKERS = (
     "no exact victim match",
     "no press coverage",
     "no leak site listing",
+    # ransomware.live answers 404 for an input it holds nothing on. The victim transforms
+    # now stop at that message instead of adding a "no match" line after it.
+    "no ransomware.live record",
     # A private or reserved address has no public routing data to return.
     "bogon",
+    # CrowdSec holds data only for addresses it has seen reported. When the pinned
+    # TRANSFORM_SAMPLES address ages out, these are what its transforms report.
+    "no cti record",
+    "no attack behaviour",
+    "no targeted countries",
 )
 
 # A transform reporting one of these rejected the sample input before making a request.
 # Distinct from a no-match: the transform is fine and the *sample* is unsuitable, which
 # happens when one entity type covers several input formats — a Phrase sample cannot be
-# both a search query and a scan UUID. Reported SKIP with a pointer at TRANSFORM_SAMPLES.
+# both a search query and an opaque id. Reported SKIP with a pointer at TRANSFORM_SAMPLES.
 INVALID_SAMPLE_MARKERS = ("invalid input",)
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
@@ -287,9 +284,13 @@ async def run(
     client = TransformClient(config)
 
     # Credentials from .env are passed as transform settings so credential-gated
-    # transforms are actually exercised rather than reported SKIP. An explicit
-    # --setting wins, which is what makes a one-off override possible.
-    merged_settings = load_env_file(config.env_file)
+    # transforms are actually exercised rather than reported SKIP. A key exported in the
+    # shell beats the file, the same precedence lifecycle.build_server_env gives the
+    # server; otherwise a stale .env value would be sent as a setting, which transforms
+    # read before the environment. An explicit --setting wins over both.
+    merged_settings = {
+        key: os.environ.get(key, value) for key, value in load_env_file(config.env_file).items()
+    }
     merged_settings.update(settings or {})
     settings = merged_settings or None
 

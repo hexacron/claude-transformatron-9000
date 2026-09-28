@@ -146,7 +146,11 @@ async def fetch(
         context.log.fatal(f"GreyNoise lookup failed: {exc.message}")
         return None
 
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError:
+        context.log.fatal("GreyNoise returned a non-JSON response")
+        return None
     if not isinstance(data, dict):
         context.log.fatal("GreyNoise returned an unexpected response shape")
         return None

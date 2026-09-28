@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 
@@ -64,10 +67,40 @@ def _pid_is_alive(pid: int) -> bool:
     return True
 
 
-def read_pid(config: TransformatronConfig) -> int | None:
-    """Return the recorded pid if it names a live process, else ``None``.
+def _is_our_server(config: TransformatronConfig, pid: int) -> bool:
+    """Return whether ``pid`` is a transform server launched from ``config.entrypoint``.
 
-    Clears a stale pid file so a crashed server does not block a restart.
+    A pid file outlives its process, and the kernel recycles pids, so after a crash or a
+    reboot the recorded pid can name an unrelated process. Signalling it would kill
+    something the user never asked us to touch, so a live pid is only trusted once its
+    command line has the exact shape ``start`` launches: a Python interpreter running the
+    entrypoint as its script. Merely mentioning the file is not enough — ``vim project.py``
+    must not be stopped. ``ps`` is consulted rather than ``/proc`` because it answers the
+    same way on macOS and Linux. If ``ps`` cannot be run the process is treated as foreign:
+    refusing to act is recoverable, a wrong kill is not.
+    """
+    if pid in _OWNED:
+        return True
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return False
+    # Split on the last space only: the interpreter path may itself contain spaces.
+    interpreter, _, script = result.stdout.strip().rpartition(" ")
+    return script == config.entrypoint.name and Path(interpreter).name.lower().startswith("python")
+
+
+def read_pid(config: TransformatronConfig) -> int | None:
+    """Return the recorded pid if it names our live server process, else ``None``.
+
+    Clears a stale pid file so a crashed server does not block a restart. A pid that is
+    not positive is corrupt, not merely stale: ``os.kill`` treats 0 and negative values
+    as process groups, so passing one on would signal far more than one process.
     """
     if not config.pid_file.exists():
         return None
@@ -76,7 +109,7 @@ def read_pid(config: TransformatronConfig) -> int | None:
     except ValueError:
         config.pid_file.unlink(missing_ok=True)
         return None
-    if not _pid_is_alive(pid):
+    if pid <= 0 or not _pid_is_alive(pid) or not _is_our_server(config, pid):
         config.pid_file.unlink(missing_ok=True)
         return None
     return pid
@@ -101,14 +134,55 @@ def resolve_config(config: TransformatronConfig) -> TransformatronConfig:
     return config.with_scheme(read_scheme(config))
 
 
+# Prefix of the Problem Details ``type`` the SDK returns when auth rejects a request,
+# including a status probe (maltego/auth/problem.py, AUTH_PROBLEM_TYPE_PREFIX).
+SDK_PROBLEM_TYPE_PREFIX = "urn:maltego-transforms:problem:"
+
+
+def _is_maltego_response(response: httpx.Response) -> bool:
+    """Return whether ``response`` came from a Maltego SDK transform server.
+
+    Any web server on the port answers *something*, so a bare status code would let an
+    unrelated service pass for ours. The SDK's status handler always sets a
+    ``maltego-protocol-version`` header (maltego/server/v3/__init__.py get_status, via
+    maltego/server/util.py set_protocol_version_header). When auth is enforced, the
+    request is rejected before that handler runs, so the SDK's auth Problem Details body
+    is accepted as proof instead.
+    """
+    if "maltego-protocol-version" in response.headers:
+        return True
+    if response.status_code not in (401, 403):
+        return False
+    try:
+        problem = response.json()
+    except ValueError:
+        return False
+    return isinstance(problem, dict) and str(problem.get("type", "")).startswith(
+        SDK_PROBLEM_TYPE_PREFIX
+    )
+
+
 def probe_health(config: TransformatronConfig, timeout: float = 3.0) -> bool:
-    """Return whether the server answers on its status endpoint."""
+    """Return whether a Maltego transform server answers on its status endpoint."""
     resolved = resolve_config(config)
     try:
         response = httpx.get(f"{resolved.api_url}/status", timeout=timeout, verify=False)
     except httpx.HTTPError:
         return False
-    return response.status_code < 500
+    return _is_maltego_response(response)
+
+
+def _port_in_use(config: TransformatronConfig, timeout: float = 1.0) -> bool:
+    """Return whether anything accepts TCP connections on the configured host and port.
+
+    Deliberately protocol-agnostic: any listener, Maltego or not, stops the server from
+    binding, and the SDK would then exit with a bind error buried in the log.
+    """
+    try:
+        with socket.create_connection((config.host, config.port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def tail_log(config: TransformatronConfig, lines: int = 50) -> str:
@@ -133,6 +207,19 @@ def status(config: TransformatronConfig) -> ServerStatus:
                 detail=(
                     f"Something is already serving {resolved.base_url}, but it was not "
                     "started by this tool, so it cannot be stopped here."
+                ),
+            )
+        if _port_in_use(config):
+            # Not a transform server, but it holds the port, so start would refuse. Saying
+            # "not running" here would send the caller into that refusal blind.
+            return ServerStatus(
+                running=False,
+                pid=None,
+                healthy=False,
+                detail=(
+                    f"Something else is listening on {config.host}:{config.port}; it is not a "
+                    "transform server started by this tool. Stop it, or change [server].port "
+                    "in transformatron.toml."
                 ),
             )
         return ServerStatus(False, None, False, "Server is not running.")
@@ -196,8 +283,9 @@ def start(config: TransformatronConfig, ssl: bool = False) -> ServerStatus:
         The status observed once the server is healthy.
 
     Raises:
-        ServerLifecycleError: If the server is already running, the entrypoint is
-            missing, certificates are absent, or startup times out.
+        ServerLifecycleError: If the server is already running, something else holds
+            the port, the entrypoint is missing, certificates are absent, or startup
+            fails or times out.
     """
     existing = read_pid(config)
     if existing is not None:
@@ -209,15 +297,24 @@ def start(config: TransformatronConfig, ssl: bool = False) -> ServerStatus:
             f"No server entrypoint at {config.entrypoint}. "
             "Generate one with: maltego-transforms start server --with-skills"
         )
+    # Validate certificates before recording anything, so a refused HTTPS start leaves no
+    # scheme file behind to make later probes address a server that never existed.
+    env = build_server_env(config, ssl=ssl)
+    # Without this check a foreign listener answers the health probe, and start would
+    # report success for a server that is not ours while ours dies on a bind error.
+    if _port_in_use(config):
+        raise ServerLifecycleError(
+            f"Something is already serving {config.host}:{config.port} and it was not "
+            "started by this tool. Stop it, or change [server].port in transformatron.toml."
+        )
 
     config.state_dir.mkdir(parents=True, exist_ok=True)
-    config.scheme_file.write_text("https" if ssl else "http")
     log_handle = config.log_file.open("ab")
     try:
         process = subprocess.Popen(
             [sys.executable, config.entrypoint.name],
             cwd=config.project_dir,
-            env=build_server_env(config, ssl=ssl),
+            env=env,
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
@@ -228,58 +325,94 @@ def start(config: TransformatronConfig, ssl: bool = False) -> ServerStatus:
 
     _OWNED[process.pid] = process
     config.pid_file.write_text(str(process.pid))
+    config.scheme_file.write_text("https" if ssl else "http")
     return _await_healthy(config, process)
 
 
+def _clear_state(config: TransformatronConfig) -> None:
+    """Forget the recorded server so nothing describes a process that is gone."""
+    config.pid_file.unlink(missing_ok=True)
+    config.scheme_file.unlink(missing_ok=True)
+
+
 def _await_healthy(config: TransformatronConfig, process: subprocess.Popen) -> ServerStatus:
-    """Wait for the server to answer, failing fast if the process dies."""
+    """Wait for the server to answer, failing fast if the process dies.
+
+    A failed start leaves no process and no pid file, so the next start is not refused by
+    a server that cannot be reached. The scheme file is kept: it records the scheme the
+    caller asked for, and the usual reason for a failed start is a transform that did not
+    import. Dropping it would bring the fixed server back on plain HTTP at the next
+    ``restart``, which the Maltego desktop client rejects without a trace in the log.
+    """
+    base_url = resolve_config(config).base_url
     deadline = time.monotonic() + STARTUP_TIMEOUT
     while time.monotonic() < deadline:
         if process.poll() is not None:
+            _OWNED.pop(process.pid, None)
             config.pid_file.unlink(missing_ok=True)
             raise ServerLifecycleError(
                 f"Server exited immediately with code {process.returncode}. "
                 f"Recent log output:\n{tail_log(config, 30)}"
             )
-        if probe_health(config):
-            resolved = resolve_config(config)
+        # The child must still be alive after the probe answers: if it died meanwhile,
+        # whatever answered is not ours, and the next iteration reports the exit.
+        if probe_health(config) and process.poll() is None:
             return ServerStatus(
                 running=True,
                 pid=process.pid,
                 healthy=True,
-                detail=f"Server started (pid {process.pid}) at {resolved.base_url}.",
+                detail=f"Server started (pid {process.pid}) at {base_url}.",
             )
         time.sleep(HEALTH_POLL_INTERVAL)
 
+    _terminate(process.pid)
+    config.pid_file.unlink(missing_ok=True)
     raise ServerLifecycleError(
-        f"Server did not answer at {resolve_config(config).base_url} within "
-        f"{STARTUP_TIMEOUT:g}s. Recent log output:\n{tail_log(config, 30)}"
+        f"Server did not answer at {base_url} within {STARTUP_TIMEOUT:g}s and was "
+        f"stopped. Recent log output:\n{tail_log(config, 30)}"
     )
 
 
+def _terminate(pid: int) -> bool:
+    """Send SIGTERM, escalating to SIGKILL after ``SHUTDOWN_TIMEOUT``.
+
+    Returns:
+        Whether the process had to be killed.
+    """
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        _OWNED.pop(pid, None)
+        return False
+    deadline = time.monotonic() + SHUTDOWN_TIMEOUT
+    while time.monotonic() < deadline:
+        if not _pid_is_alive(pid):
+            _OWNED.pop(pid, None)
+            return False
+        time.sleep(HEALTH_POLL_INTERVAL)
+
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
+    owned = _OWNED.pop(pid, None)
+    if owned is not None:
+        owned.wait(timeout=SHUTDOWN_TIMEOUT)
+    return True
+
+
 def stop(config: TransformatronConfig) -> str:
-    """Terminate the server, escalating to SIGKILL if it does not exit."""
+    """Terminate the server, escalating to SIGKILL if it does not exit.
+
+    Only a pid that :func:`read_pid` confirms is our server is ever signalled.
+    """
     pid = read_pid(config)
     if pid is None:
         return "Server is not running."
 
-    os.kill(pid, signal.SIGTERM)
-    deadline = time.monotonic() + SHUTDOWN_TIMEOUT
-    while time.monotonic() < deadline:
-        if not _pid_is_alive(pid):
-            config.pid_file.unlink(missing_ok=True)
-            config.scheme_file.unlink(missing_ok=True)
-            _OWNED.pop(pid, None)
-            return f"Server stopped (pid {pid})."
-        time.sleep(HEALTH_POLL_INTERVAL)
-
-    os.kill(pid, signal.SIGKILL)
-    owned = _OWNED.pop(pid, None)
-    if owned is not None:
-        owned.wait(timeout=SHUTDOWN_TIMEOUT)
-    config.pid_file.unlink(missing_ok=True)
-    config.scheme_file.unlink(missing_ok=True)
-    return f"Server did not exit within {SHUTDOWN_TIMEOUT:g}s and was killed (pid {pid})."
+    killed = _terminate(pid)
+    _clear_state(config)
+    if killed:
+        return f"Server did not exit within {SHUTDOWN_TIMEOUT:g}s and was killed (pid {pid})."
+    return f"Server stopped (pid {pid})."
 
 
 def restart(config: TransformatronConfig, ssl: bool | None = None) -> ServerStatus:

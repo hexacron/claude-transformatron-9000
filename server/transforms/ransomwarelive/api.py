@@ -109,7 +109,11 @@ async def fetch(
         context.log.fatal(f"ransomware.live lookup failed: {exc.message}")
         return None
 
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError:
+        context.log.fatal("ransomware.live returned a non-JSON response")
+        return None
     if not isinstance(data, dict):
         context.log.fatal("ransomware.live returned an unexpected response shape")
         return None

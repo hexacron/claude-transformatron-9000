@@ -99,22 +99,68 @@ def build_run_request(
 def collect_events(events: list[dict[str, Any]], result: RunResult) -> None:
     """Sort protocol events into entities, links, and status messages.
 
-    Events arrive as ``{"timestamp": ..., "data": {"inputType": ..., ...}}``.
-    Only ADD/UPDATE events contribute output; DELETE events retract earlier ones.
+    Events arrive as ``{"timestamp": ..., "data": {"inputType": ..., "eventType": ...}}``,
+    per ``TransformRunEvent`` in maltego/protocol/v3/execution/transform_run.py, where
+    ``eventType`` is ADD (the default), UPDATE, or DELETE. Only ADD creates output. The SDK
+    emits an UPDATE whenever a transform edits an entity it already returned — setting a
+    property, note, or display field after ``add_entity`` — carrying just the entity id and
+    the changed fields; a DELETE carries only the id. Appending those as new entities would
+    count one entity several times, which misreports the very number an author checks.
     """
     for event in events:
         data = event.get("data", {})
         input_type = data.get("inputType")
-        if data.get("eventType") == "DELETE":
-            continue
+        event_type = data.get("eventType", "ADD")
         if input_type == "ENTITY" and "entity" in data:
-            result.entities.append(data["entity"])
+            _apply_event(result.entities, event_type, data["entity"])
         elif input_type == "LINK" and "link" in data:
-            result.links.append(data["link"])
-        elif input_type == "STATUS_MESSAGE":
+            _apply_event(result.links, event_type, data["link"])
+        elif input_type == "STATUS_MESSAGE" and event_type == "ADD":
             text = data.get("statusMessage", {}).get("text") or data.get("text")
             if text:
                 result.messages.append(str(text))
+
+
+def _apply_event(items: list[dict[str, Any]], event_type: str, item: dict[str, Any]) -> None:
+    """Apply one ADD/UPDATE/DELETE event for an entity or link to the collected ``items``.
+
+    An UPDATE or DELETE for an id that was never added (the input entity, say) changes
+    nothing, because it is not part of this run's output.
+    """
+    if event_type == "ADD":
+        items.append(dict(item))
+        return
+    item_id = item.get("id")
+    if item_id is None:
+        return
+    index = next((i for i, existing in enumerate(items) if existing.get("id") == item_id), None)
+    if index is None:
+        return
+    if event_type == "DELETE":
+        del items[index]
+    elif event_type == "UPDATE":
+        items[index] = _merge_update(items[index], item)
+
+
+def _merge_update(current: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
+    """Return ``current`` with the fields of an UPDATE event applied.
+
+    ``to_v3_run_entity_update`` in the SDK sends only what changed: ``properties`` holds just
+    the changed properties, so they replace by name; ``displayInformation`` and ``overlays``
+    hold just the items added (the SDK only ever appends to them), so they extend. Any other
+    field present replaces the old value.
+    """
+    merged = dict(current)
+    for key, value in update.items():
+        if key == "properties" and isinstance(value, list):
+            by_name = {prop.get("name"): prop for prop in merged.get("properties") or []}
+            by_name.update({prop.get("name"): prop for prop in value})
+            merged["properties"] = list(by_name.values())
+        elif isinstance(value, list) and isinstance(merged.get(key), list):
+            merged[key] = [*merged[key], *value]
+        else:
+            merged[key] = value
+    return merged
 
 
 class TransformClient:
@@ -140,7 +186,14 @@ class TransformClient:
             )
         if not response.content:
             return None
-        return response.json()
+        try:
+            return response.json()
+        except ValueError as exc:
+            # Something other than the transform server answered — another service on the
+            # port, or a proxy error page. A bare JSONDecodeError would say nothing about that.
+            raise TransformServerError(
+                f"{method} {url} returned a response that is not JSON: {response.text[:200]}"
+            ) from exc
 
     async def status(self) -> Any:
         """Return the server status document."""

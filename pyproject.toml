@@ -32,9 +32,9 @@ packages = ["src/transformatron"]
 [tool.ruff]
 line-length = 100
 target-version = "py313"
-# The SDK owns everything under server/ except transforms/ — linting generated files
-# would churn against upstream on every regeneration. transforms/ is user code that
-# happens to live inside the generated tree, so it is linted like the rest of the project.
+# The SDK owns the files it generates under server/ (.agents/, project.py, __init__.py) —
+# linting them would churn against upstream on every regeneration. Everything else under
+# server/ (transforms/, middleware.py, discovery.py) is project code and is linted.
 extend-exclude = [
     "server/.agents",
     "server/project.py",

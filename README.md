@@ -15,8 +15,10 @@ a spec, restart, run it, see the entities, fix what the spec got wrong.
 Everything works two ways: an **MCP server** for agents that speak it, and a **CLI** for humans and
 any agent that can run commands. Both call the same code, so they behave identically.
 
-> **Status:** early. Built and verified against a live server on macOS, but not yet exercised on
-> Linux or Windows, and not published to PyPI. Expect rough edges.
+> **Status:** early. Built and verified against a live server on macOS; Linux should work but has
+> not been exercised. **Windows is not supported** — the lifecycle relies on POSIX signals, and its
+> `os.kill(pid, 0)` liveness probe would terminate the server there. Not published to PyPI. Expect
+> rough edges.
 
 ## Requirements
 
@@ -29,8 +31,8 @@ any agent that can run commands. Both call the same code, so they behave identic
 ## Quick start
 
 ```bash
-git clone <your-fork-url> claude-transformatron-9000
-cd claude-transformatron-9000
+git clone https://github.com/hexacron/transformatron.git
+cd transformatron
 uv sync
 uv run pytest -q
 ```
@@ -63,8 +65,17 @@ this problem, not a sign the server is broken.
    `https://127.0.0.1:3000/seed`.
 5. Install the hub item, then right-click a matching entity to run a transform.
 
-The server binds to `127.0.0.1` only. That is fine for a client on the same machine, but a client
-on another host will not reach it.
+The server binds to `127.0.0.1` by default, which reaches a client on the same machine and nothing
+else. `host` and `port` are set in `transformatron.toml` (see [Naming](#naming)). Binding a
+non-loopback address such as `0.0.0.0` makes the server reachable from other machines, but two
+things do not follow it:
+
+- **The certificate** from `generate_certs` covers only `localhost` and `127.0.0.1`, so a client
+  dialling any other address rejects it. A remote client needs a certificate for the address it
+  dials, placed at `.transformatron/certs/cert.pem` and `key.pem`.
+- **The seed URL** is built from the bind address. With `0.0.0.0` it reads
+  `https://0.0.0.0:3000/seed`, which another machine cannot dial — substitute the machine's
+  reachable address when registering the hub item.
 
 ## Build your first transform
 
@@ -102,39 +113,37 @@ Created files:
   - server/transforms/urlscan/lookup.py
 
 Transforms:
-  - Urlscan: Lookup (IPv6Address -> Phrase)
+  - Urlscan: Lookup (Phrase -> Phrase, GET /api/v1/search/)
 
-Import added to server/project.py.
+No API key: the request showed no authentication.
+Imports added to server/project.py.
 ```
 
-Note `IPv6Address -> Phrase`, which is wrong on both sides: the endpoint takes a search query and
-returns a list of scans. The scaffolder had a URL and nothing else, so it guessed from the
-parameter name and guessed badly. Correcting that is the next three steps, and it is the normal
-case rather than a mishap — pass `--sample-response` with real JSON and the output side improves,
-but only a live run settles it.
+The input side is right: `q` carries a search query, so the transform takes a `Phrase`. The output
+side is a placeholder — the scaffolder had a URL and no response, so it has nothing to map. Passing
+`--sample-response` with real JSON fixes most of that up front, but only a live run settles it.
 
 **3. It restarts and confirms registration** — `restart`, then `list`. The server only loads code
 at startup, so an edit without a restart changes nothing. A transform missing from `list` almost
 always means a missing import in `project.py`, which `scaffold` writes for you.
 
-**4. It runs the transform and reads the output.** The generated code maps one `Phrase` out of the
-response, so the first run reports something like:
+**4. It runs the transform and reads the output:**
 
 ```
 State: COMPLETED (success)
-Entities (1):
-  {"type": "maltego.Phrase", ...}
+Messages:
+  - Urlscan returned no mapped entities for this input
+Entities (0):
 ```
 
 **This is the step that makes the difference.** `COMPLETED (success)` is not the answer — the
-entity count is. One `Phrase` holding a blob of text is not a useful transform: urlscan returns a
-list of scans, each with a page URL, an IP and an ASN. The agent now knows the real response shape,
-which the cURL command never told it.
+entity count is. Zero entities from a search that has results is a broken transform, and nothing
+but the count says so.
 
-**5. It corrects the mapping and goes round again.** Take the input as a search `Phrase`, walk
-`results[]`, map `page.url` to a `URL`, `page.ip` to an `IPv4Address`, `page.domain` to a `Domain`
-and `page.asn` to an `AS`. Restart, run, read the entities again — the finished transform returns
-25 for this query rather than 1. Two or three passes is normal.
+**5. It corrects the mapping and goes round again.** urlscan returns a list of scans under
+`results[]`, each with a nested `page` object. Walk `results[]`, map `page.url` to a `URL`,
+`page.ip` to an `IPv4Address`, `page.domain` to a `Domain` and `page.asn` to an `AS`. Restart,
+run, read the entities again. Two or three passes is normal.
 
 **6. It gates the result:**
 
@@ -169,8 +178,9 @@ a fault.
 The same loop, driven yourself. Scaffold from a spec:
 
 ```bash
-uv run python scripts/transformatron_cli.py scaffold --service ipinfo \
-  --curl 'curl -H "Authorization: Bearer TOKEN" https://ipinfo.io/8.8.8.8/json'
+uv run python scripts/transformatron_cli.py scaffold \
+  --curl 'curl https://internetdb.shodan.io/8.8.8.8' \
+  --sample-response "$(curl -s https://internetdb.shodan.io/8.8.8.8)"
 ```
 
 Or write a module under `server/transforms/` directly — this is the minimal shape:
@@ -226,23 +236,46 @@ client with the auth and validation wired up, one module per transform, and the 
 `server/project.py`.
 
 ```bash
-# From a cURL command, with a sample response to infer output entities from.
+# From a cURL command, with a real response to infer output entities from.
 uv run python scripts/transformatron_cli.py scaffold --service demo \
-  --curl 'curl -H "X-API-KEY: k" https://api.demo.com/v1/ip/8.8.8.8'
+  --curl 'curl -H "X-API-KEY: k" https://api.demo.com/v1/ip/8.8.8.8' \
+  --sample-response "$(curl -s -H 'X-API-KEY: k' https://api.demo.com/v1/ip/8.8.8.8)"
 
-# From an OpenAPI spec — a path or the document itself.
-uv run python scripts/transformatron_cli.py scaffold --service demo --openapi ./demo-openapi.json
+# From an OpenAPI spec — a URL, a path, or the document itself.
+uv run python scripts/transformatron_cli.py scaffold --service demo \
+  --openapi https://api.demo.com/openapi.json
+
+# POST operations are skipped unless named, because they may create or change data.
+uv run python scripts/transformatron_cli.py scaffold --service demo \
+  --openapi ./demo-openapi.json --operation searchHosts
 ```
 
-It infers input and output entity types from parameter names and the sample response, picks the
-right validator for the input type, and handles keys sent as a header, a bearer token, or a query
-parameter.
+What it works out:
 
-**Treat the result as a first draft.** The generator works from the spec, and specs routinely
-disagree with the live API about which fields are present, what a 404 means, and how errors are
-shaped. Run the transform, read the entities, and correct the mapping — the loop above exists for
-exactly this. An existing service is never overwritten: scaffolding onto one raises rather than
-replacing hand-written code that has already absorbed those corrections.
+- **The input.** Whichever part of the request — a path segment, a query parameter, or a JSON or
+  form body field — holds something that looks like an IP, domain, URL, email, hash or CVE, by name
+  or by value. Failing that, a lone query parameter or the last path segment becomes a `Phrase`.
+  Other query parameters and body fields are kept and sent with every request.
+- **The method and body.** A cURL command with `-d`, `--json` or `-X POST` scaffolds a POST that
+  sends the body with the input substituted in.
+- **Authentication.** A key-like header, a bearer token, or a key-like query parameter
+  (`apikey`, `token`, …) becomes a `TransformSetting`. A request with none of these scaffolds a
+  client that needs no key. OpenAPI schemes it cannot express (OAuth2, basic) are reported, not
+  guessed.
+- **The outputs.** Every field of the sample response (or the OpenAPI response schema, with
+  `$ref`s resolved) maps to an entity by name, or by value where the value is unambiguously an
+  address, domain, URL or email. Nested objects and lists of objects are followed one level down; a
+  response that is itself a list is walked record by record.
+
+Anything it skipped or could not express — an operation with no input, a path parameter with no
+default, an unsupported auth scheme — is listed under **Notes** in its output.
+
+**Treat the result as a first draft.** Every field is mapped, so expect to delete the ones an
+investigator does not need, and expect the live API to disagree with the spec about which fields
+are present, what a 404 means, and how errors are shaped. Run the transform, read the entities, and
+correct the mapping — the loop above exists for exactly this. An existing service is never
+overwritten unless you pass `--force`, so hand-written code that has absorbed those corrections is
+safe from a stray re-run.
 
 ## Writing transforms
 
@@ -261,13 +294,17 @@ ways that fail silently: the code looks right, the run reports success, and no e
 
 ## The loop
 
-1. Add or edit a module under `server/transforms/`.
-2. Import it in `server/project.py` (`from transforms.my_module import *`). **The server only
-   discovers what `project.py` imports** — this is the most common reason a new transform never
-   shows up.
+1. `scaffold` a module package from a spec, or add or edit a module under `server/transforms/`.
+2. Import it in `server/project.py` (`from transforms.my_module import *`); `scaffold` does this
+   for you. **The server only discovers what `project.py` imports** — this is the most common
+   reason a new transform never shows up. (`server/transforms/local/` is the exception; see
+   [below](#transforms-you-do-not-want-to-publish).)
 3. `server_restart` — this is the reload path. It keeps the scheme the server is already
    running under, so an HTTPS server stays on HTTPS.
-4. `list_transforms` to confirm it registered, then `run_transform` to exercise it.
+4. `list_transforms` to confirm it registered, then `run_transform` to exercise it — and read the
+   entity count, not the state.
+5. Delete the fields nobody needs, fix the mapping, and go round again. Finish with the
+   [smoke test](#smoke-testing-transforms).
 
 ## Commands
 
@@ -287,7 +324,7 @@ Every operation is available as a CLI command and as an MCP tool. Both call the 
 | Run one transform | `run <id> <type> <value>` | `run_transform(...)` |
 | Seed URL and registration steps | `seed-url` | `get_seed_url()` |
 | Self-signed cert for HTTPS | `certs [--force]` | `generate_certs(force=False)` |
-| Scaffold from cURL / OpenAPI | `scaffold [--curl ...]` | `scaffold_transform(...)` |
+| Scaffold from cURL / OpenAPI | `scaffold --curl ...\|--openapi ... [--operation ID] [--force]` | `scaffold_transform(...)` |
 
 CLI commands are prefixed `uv run python scripts/transformatron_cli.py`:
 
@@ -298,6 +335,18 @@ uv run python scripts/transformatron_cli.py run <id> maltego.IPv4Address 8.8.8.8
 ```
 
 Pass settings with repeated `--setting KEY=VALUE`. `--help` works on any subcommand.
+
+The CLI exits 0 on success and 1 when the operation failed: a start, stop, restart or certificate
+generation that failed, a server it could not reach (so `status` exits 1 when nothing is serving,
+and `status || start` works), a run that did not end in a success state, a refused scaffold, or an
+unusable `transformatron.toml` (reported as one `error:` line on stderr, without a traceback). One
+case does not count as failure: **a run that completes with zero entities exits 0.** The count in
+the output is the signal — for a gate that fails on it, use the
+[smoke test](#smoke-testing-transforms).
+
+The MCP tools read `transformatron.toml` on every call, as the CLI does, so an edit applies on the
+next tool call with no MCP restart. A malformed file comes back as the tool's result rather than
+stopping the MCP server loading.
 
 Adding an operation? Put it in `src/transformatron/operations.py` and both front ends get it.
 
@@ -316,8 +365,8 @@ cp .env.example .env
 
 `.env` is read when the server starts and merged into its environment, so a key written once
 survives restarts. The smoke test reads it too, which is the difference between a credential-gated
-transform being exercised and being reported SKIP. An exported shell variable beats the file, and
-an explicit `--setting` beats both.
+transform being exercised and being reported SKIP. In both, an exported shell variable beats the
+file, and for the smoke test an explicit `--setting` beats both.
 
 `.env` is gitignored. `.env.example` is the committed template and holds no values. This is a
 development convenience: it puts keys in the server process's environment, visible to anyone who
@@ -329,9 +378,15 @@ Anything under `server/transforms/local/` is gitignored and discovered automatic
 server starts. Use it for integrations that should not be committed — an internal API, a
 client-specific lookup, work in progress.
 
-It is discovered rather than imported by name, because a fresh clone does not have the directory
-and a static import of a missing module stops the server booting. The committed examples alongside
-it keep their explicit imports in `project.py`.
+Both shapes are picked up: a package (`local/<service>/` with an `__init__.py`), from which every
+module except `api.py` is imported, and a single-file module directly under `local/`
+(`local/lookup.py`). Names starting with `_` are skipped at either level, so helpers can sit
+alongside. The server log records what was loaded at startup — `Local transforms loaded: ...` —
+so check `logs` when a local transform is missing from `list`.
+
+It is discovered rather than imported by name, because a clone without the private modules must
+still boot, and a static import of a missing module stops the server booting. The committed
+examples alongside it keep their explicit imports in `project.py`.
 
 ## Using it with a coding agent
 
@@ -361,7 +416,8 @@ everything they do.
 If you are modifying this project's own code under `src/transformatron/`, note that the MCP tools
 run the version loaded when the session started, so your edits will not show up there until you
 relaunch. The CLI always runs current code. `AGENTS.md` has the details — this does not affect
-editing transforms under `server/transforms/`.
+editing transforms under `server/transforms/`, nor `transformatron.toml`, which the tools read on
+every call.
 
 ## Using it from Python
 
@@ -486,11 +542,12 @@ scripts/
   transformatron_cli.py     CLI front end
   smoke_test_transforms.py  runs every transform, fails on zero entities
 server/          SDK-generated (`maltego-transforms start server --with-skills`).
-                 Upstream-owned except transforms/: .agents/ and project.py are
-                 excluded from ruff so regeneration does not churn.
+                 .agents/, project.py and __init__.py are upstream-owned and excluded from
+                 ruff so regeneration does not churn; the rest is linted.
   project.py     entrypoint; imports decide what gets registered
+  discovery.py   finds and imports the modules under transforms/local/
   transforms/    your transform modules go here — linted like the rest of the project
-    local/       gitignored; discovered at startup, for integrations you do not publish
+    local/       gitignored; packages and single modules discovered at startup
 .claude/skills/
   maltego-transform-author/  authoring checklist; points at docs/, not a second copy
 docs/
@@ -499,7 +556,7 @@ docs/
   ipinfo.md                bearer auth, one response to several entities
   upstream-sdk-issue.md    draft bug report, not yet filed
 tests/           unit tests for the control plane and the scaffolder
-transformatron.toml  server name, namespace, author. Gitignored; .example is the template.
+transformatron.toml  server name, namespace, author, host, port. Gitignored; copy the .example.
 .env             API keys for headless runs. Gitignored; .env.example is the template.
 .transformatron/ runtime state — PID, log, certs, recorded scheme. Gitignored.
 ```
@@ -537,8 +594,8 @@ Things that cost real debugging time, recorded so they cost you less:
 
 - **The desktop client requires HTTPS** (see [above](#connecting-to-the-maltego-desktop-client)).
 
-- **The server runs on port 3000.** The SDK's own skill scripts default to 8080 — pass
-  `--port 3000` if you invoke them directly.
+- **The server runs on port 3000** unless `transformatron.toml` sets another. The SDK's own skill
+  scripts default to 8080 — pass `--port` with your port if you invoke them directly.
 
 - **`MALTEGO_SERVER_*` environment variables take precedence** over the values hardcoded in
   `project.py`. That is how the lifecycle tools set host, port, and scheme without editing the
@@ -556,9 +613,10 @@ uv run ruff check . && uv run ruff format --check .
 uv run ty check src tests scripts
 ```
 
-`server/.agents/` and `server/project.py` are excluded from linting: the SDK owns them, and
-regenerating would churn against upstream. `server/transforms/` is your code and is linted like the
-rest of the project — including anything `scaffold` generates.
+`server/.agents/`, `server/project.py` and `server/__init__.py` are excluded from linting: the SDK
+owns them, and regenerating would churn against upstream. The rest of `server/` —
+`transforms/`, `middleware.py`, `discovery.py` — is your code and is linted like the rest of the
+project, including anything `scaffold` generates.
 
 ### Smoke-testing transforms
 
@@ -603,9 +661,11 @@ author      = "Acme Corp"
 ```
 
 `transformatron.toml` is gitignored, so your identity does not travel with a fork. The CLI and
-MCP server pass these to the transform server as `MALTEGO_SERVER_*` variables, which outrank the
-values in `server/project.py` — so **you never edit `project.py` to rename a server**. Restart to
-apply, then confirm:
+MCP server read it on every command or tool call and pass it to the transform server as
+`MALTEGO_SERVER_*` variables, which outrank the values in `server/project.py` — so **you never
+edit `project.py` to rename a server**. The same file sets `host` and `port` (see
+`transformatron.toml.example`). Nothing needs relaunching to pick up an edit except the transform
+server itself, which takes these values at start. Restart it to apply, then confirm:
 
 ```bash
 uv run python scripts/transformatron_cli.py restart

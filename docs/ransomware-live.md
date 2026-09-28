@@ -83,7 +83,10 @@ swagger listing them separately. The code uses `/groups/`.
 
 Large groups would otherwise flood the graph — LockBit has over 2000 victims. Victim listings and
 search results cap at 100 (`VICTIM_LIMIT`, `SEARCH_LIMIT`), indicators at 200 (`IOC_LIMIT`). Each
-transform logs the true upstream total, so a truncated result is visible rather than silent.
+transform logs the true upstream total, so a truncated result is visible rather than silent. The
+victim transforms that need an exact match (`Domain to Breach`, `Victim Details`, `Victim to
+Press`) filter the full search result first and cap afterwards, so a match is never cut off by
+the limit.
 
 ## Verification
 
@@ -97,12 +100,14 @@ uv run python scripts/smoke_test_transforms.py \
 Exporting `RANSOMWARE_LIVE_API_KEY` before starting the server works too — `api.py` falls back to
 the environment when the client setting is empty.
 
-Expect **17 passed, 2 skipped** across both example sets. The two skips are `victim_details` and
-`victim_to_press`: both need an exact victim organisation name, while the shared `Company` sample
-(`hospital`) is a search substring. They report SKIP rather than FAIL because the transform ran
-correctly and said it had no match. To exercise them, add a `TRANSFORM_SAMPLES` entry in
-`scripts/smoke_test_transforms.py` naming a victim currently listed in `/victims/recent` — that
-value goes stale as listings are taken down, which is why none is committed.
+Every transform in this set should report PASS or SKIP; any FAIL is worth reading. Counts are not
+pinned here because they drift with the upstream data and with which other integrations are
+configured. `victim_details` and `victim_to_press` usually SKIP: both need an exact victim
+organisation name, while the shared `Company` sample (`hospital`) is a search substring. They
+report SKIP rather than FAIL because the transform ran correctly and said it had no match. To
+exercise them, add a `TRANSFORM_SAMPLES` entry in `scripts/smoke_test_transforms.py` naming a
+victim currently listed in `/victims/recent` — that value goes stale as listings are taken down,
+which is why none is committed.
 
 `group_to_cves`, `group_to_ttps` and `list_groups` have `TRANSFORM_SAMPLES` entries already: the
 default `lockbit3` sample has empty `ttps` and `vulnerabilities`, so those two use `akira`, and

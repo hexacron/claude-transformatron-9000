@@ -1,4 +1,4 @@
-# claude-transformatron-9000
+# transformatron
 
 **Read [AGENTS.md](AGENTS.md).** It is the canonical agent guide for this repository and applies
 to Claude Code exactly as written — the loop, the verification gates, and the constraints all

@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from transformatron import mcp
 from transformatron.config import (
     CONFIG_FILE_NAME,
     DEFAULT_AUTHOR,
@@ -153,3 +154,30 @@ def test_defaults_are_the_documented_placeholders() -> None:
     assert DEFAULT_SERVER_NAME == "New Maltego Integration"
     assert DEFAULT_NAMESPACE == "acme.new_maltego_integration"
     assert DEFAULT_AUTHOR == "Acme Corp"
+
+
+async def test_mcp_tools_apply_an_edited_file_on_the_next_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The MCP server is long-lived; a port changed in the file must not need a client restart."""
+    monkeypatch.setattr("transformatron.config.REPO_ROOT", tmp_path)
+    config_file = tmp_path / CONFIG_FILE_NAME
+
+    config_file.write_text("[server]\nport = 8080\n")
+    assert ":8080/seed" in await mcp.get_seed_url()
+
+    config_file.write_text("[server]\nport = 9090\n")
+    assert ":9090/seed" in await mcp.get_seed_url()
+
+
+async def test_mcp_tools_report_a_bad_file_instead_of_crashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A typo made while the MCP server runs must reach the agent as a message it can fix."""
+    monkeypatch.setattr("transformatron.config.REPO_ROOT", tmp_path)
+    (tmp_path / CONFIG_FILE_NAME).write_text("[server]\nport = 80\n")
+
+    result = await mcp.server_status()
+
+    assert result.startswith("Failed: ")
+    assert "[server].port must be between" in result

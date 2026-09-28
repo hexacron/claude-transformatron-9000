@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import socket
+import subprocess
+import sys
+from collections.abc import Iterator
 
 import httpx
 import pytest
 
-from transformatron import lifecycle
+from transformatron import certs, lifecycle
 from transformatron.config import TransformatronConfig
 
 
@@ -18,6 +22,32 @@ def config(tmp_path) -> TransformatronConfig:
     project.mkdir()
     (project / "project.py").write_text("")
     return TransformatronConfig(project_dir=project, state_dir=tmp_path / "state")
+
+
+@pytest.fixture
+def server_child(config: TransformatronConfig) -> Iterator[subprocess.Popen]:
+    """A real process running the entrypoint, launched outside ``lifecycle``.
+
+    It is not in ``lifecycle._OWNED``, so ownership has to be proven from its command
+    line, exactly as for a server started by an earlier CLI invocation.
+    """
+    config.entrypoint.write_text("import time\ntime.sleep(60)\n")
+    process = subprocess.Popen([sys.executable, config.entrypoint.name], cwd=config.project_dir)
+    yield process
+    process.kill()
+    process.wait()
+
+
+def _free_port() -> int:
+    """Return a loopback port nothing is listening on."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _on_free_port(config: TransformatronConfig) -> TransformatronConfig:
+    """Point ``config`` at an unused loopback port, so a real start is not refused."""
+    return dataclasses.replace(config, host="127.0.0.1", port=_free_port())
 
 
 def test_read_pid_clears_a_stale_pid_file(config: TransformatronConfig) -> None:
@@ -38,11 +68,48 @@ def test_read_pid_clears_a_corrupt_pid_file(config: TransformatronConfig) -> Non
     assert not config.pid_file.exists()
 
 
-def test_read_pid_returns_a_live_process(config: TransformatronConfig) -> None:
+def test_read_pid_returns_our_live_server(
+    config: TransformatronConfig, server_child: subprocess.Popen
+) -> None:
+    config.state_dir.mkdir(parents=True)
+    config.pid_file.write_text(str(server_child.pid))
+
+    assert lifecycle.read_pid(config) == server_child.pid
+
+
+def test_read_pid_does_not_trust_a_foreign_process(config: TransformatronConfig) -> None:
+    """A recycled pid naming some other live process is stale, not our server."""
     config.state_dir.mkdir(parents=True)
     config.pid_file.write_text(str(os.getpid()))
 
-    assert lifecycle.read_pid(config) == os.getpid()
+    assert lifecycle.read_pid(config) is None
+    assert not config.pid_file.exists()
+
+
+def test_read_pid_does_not_trust_a_process_that_merely_opens_the_entrypoint(
+    config: TransformatronConfig,
+) -> None:
+    """An editor or pager holding project.py open is not the server and must not be stopped."""
+    config.entrypoint.write_text("")
+    viewer = subprocess.Popen(["tail", "-f", config.entrypoint.name], cwd=config.project_dir)
+    try:
+        config.state_dir.mkdir(parents=True)
+        config.pid_file.write_text(str(viewer.pid))
+
+        assert lifecycle.read_pid(config) is None
+    finally:
+        viewer.kill()
+        viewer.wait()
+
+
+@pytest.mark.parametrize("recorded", ["0", "-1"])
+def test_read_pid_rejects_non_positive_pids(config: TransformatronConfig, recorded: str) -> None:
+    """os.kill treats 0 and negative pids as process groups, so they must never pass."""
+    config.state_dir.mkdir(parents=True)
+    config.pid_file.write_text(recorded)
+
+    assert lifecycle.read_pid(config) is None
+    assert not config.pid_file.exists()
 
 
 def test_exited_child_is_not_reported_alive(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -77,9 +144,18 @@ def test_live_owned_child_is_reported_alive(monkeypatch: pytest.MonkeyPatch) -> 
     assert lifecycle._pid_is_alive(pid)
 
 
-def test_start_refuses_when_already_running(config: TransformatronConfig) -> None:
+def test_start_refuses_when_already_running(
+    config: TransformatronConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid = 424244
+
+    class RunningChild:
+        def poll(self) -> None:
+            return None
+
+    monkeypatch.setitem(lifecycle._OWNED, pid, RunningChild())
     config.state_dir.mkdir(parents=True)
-    config.pid_file.write_text(str(os.getpid()))
+    config.pid_file.write_text(str(pid))
 
     with pytest.raises(lifecycle.ServerLifecycleError, match="already running"):
         lifecycle.start(config)
@@ -94,6 +170,26 @@ def test_start_reports_a_missing_entrypoint(tmp_path) -> None:
 
 def test_stop_is_safe_when_not_running(config: TransformatronConfig) -> None:
     assert lifecycle.stop(config) == "Server is not running."
+
+
+def test_stop_never_signals_a_foreign_process(
+    config: TransformatronConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pid file naming someone else's process must not get that process killed."""
+    config.state_dir.mkdir(parents=True)
+    config.pid_file.write_text(str(os.getpid()))
+    sent: list[int] = []
+    real_kill = os.kill
+
+    def recording_kill(pid: int, sig: int) -> None:
+        if sig != 0:
+            sent.append(sig)
+        real_kill(pid, sig)
+
+    monkeypatch.setattr(lifecycle.os, "kill", recording_kill)
+
+    assert lifecycle.stop(config) == "Server is not running."
+    assert sent == []
 
 
 def test_build_server_env_pins_host_port_and_scheme(config: TransformatronConfig) -> None:
@@ -161,12 +257,53 @@ def test_probe_health_uses_recorded_scheme(
 
     def fake_get(url: str, **kwargs: object) -> httpx.Response:
         probed.append(url)
-        return httpx.Response(200, request=httpx.Request("GET", url))
+        return httpx.Response(
+            200,
+            headers={"maltego-protocol-version": "3.1"},
+            request=httpx.Request("GET", url),
+        )
 
     monkeypatch.setattr(lifecycle.httpx, "get", fake_get)
 
     assert lifecycle.probe_health(config) is True
     assert probed[0].startswith("https://")
+
+
+@pytest.mark.parametrize(
+    ("response", "healthy"),
+    [
+        pytest.param(
+            httpx.Response(200, headers={"maltego-protocol-version": "3.1"}),
+            True,
+            id="sdk-status",
+        ),
+        pytest.param(
+            httpx.Response(
+                401,
+                json={"type": "urn:maltego-transforms:problem:auth:credentials-missing"},
+            ),
+            True,
+            id="sdk-auth-rejection",
+        ),
+        pytest.param(httpx.Response(200, text="<html>hello</html>"), False, id="foreign-200"),
+        pytest.param(httpx.Response(404, text="Not Found"), False, id="foreign-404"),
+        pytest.param(httpx.Response(401, json={"error": "nope"}), False, id="foreign-401"),
+    ],
+)
+def test_probe_health_only_accepts_a_maltego_server(
+    config: TransformatronConfig,
+    monkeypatch: pytest.MonkeyPatch,
+    response: httpx.Response,
+    healthy: bool,
+) -> None:
+    """Any web server on the port answers something; only the SDK counts as healthy.
+
+    An auth-enforcing SDK server rejects the unauthenticated probe, but with its own
+    Problem Details body, so it still counts as up rather than timing startup out.
+    """
+    monkeypatch.setattr(lifecycle.httpx, "get", lambda *a, **k: response)
+
+    assert lifecycle.probe_health(config) is healthy
 
 
 def test_build_server_env_requires_certs_for_ssl(config: TransformatronConfig) -> None:
@@ -282,3 +419,93 @@ def test_status_flags_a_foreign_server_it_cannot_stop(
     assert not status.running
     assert status.healthy
     assert "not started by this tool" in status.detail
+
+
+def test_start_refuses_a_port_something_else_holds(config: TransformatronConfig) -> None:
+    """A foreign listener would otherwise answer the probe and pass for our server."""
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        busy = dataclasses.replace(config, host="127.0.0.1", port=listener.getsockname()[1])
+
+        with pytest.raises(lifecycle.ServerLifecycleError, match="already serving"):
+            lifecycle.start(busy)
+
+    assert not busy.pid_file.exists()
+    assert not busy.scheme_file.exists()
+
+
+def test_status_names_a_foreign_listener_that_start_would_refuse(
+    config: TransformatronConfig,
+) -> None:
+    """`status` must not report a free port when `start` is about to refuse it."""
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        busy = dataclasses.replace(config, host="127.0.0.1", port=listener.getsockname()[1])
+
+        reported = lifecycle.status(busy)
+
+    assert not reported.running
+    assert "Something else is listening" in reported.detail
+
+
+def test_refused_https_start_records_no_scheme(config: TransformatronConfig) -> None:
+    """A stale scheme file would make later probes address a server that never ran."""
+    with pytest.raises(lifecycle.ServerLifecycleError, match="generate_certs"):
+        lifecycle.start(config, ssl=True)
+
+    assert not config.scheme_file.exists()
+    assert not config.pid_file.exists()
+
+
+def test_crashed_start_clears_its_pid(config: TransformatronConfig) -> None:
+    config.entrypoint.write_text("raise SystemExit(3)\n")
+    local = _on_free_port(config)
+
+    with pytest.raises(lifecycle.ServerLifecycleError, match="exited immediately with code 3"):
+        lifecycle.start(local, ssl=False)
+
+    assert not local.pid_file.exists()
+
+
+def test_crashed_https_start_keeps_https_for_the_next_restart(
+    config: TransformatronConfig,
+) -> None:
+    """A transform that fails to import must not turn the fixed server into an HTTP one.
+
+    The Maltego desktop client rejects plain HTTP without a trace in the server log, so a
+    restart after fixing the import has to come back on the scheme that was asked for.
+    """
+    local = _on_free_port(config)
+    certs.generate(local)
+    local.entrypoint.write_text("raise SystemExit(3)\n")
+
+    with pytest.raises(lifecycle.ServerLifecycleError, match="exited immediately"):
+        lifecycle.start(local, ssl=True)
+
+    assert lifecycle.read_scheme(local) == "https"
+
+
+def test_start_timeout_leaves_nothing_running_or_recorded(
+    config: TransformatronConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server that never answers is stopped, not left orphaned behind a failed start."""
+    child_pid_file = config.project_dir / "child.pid"
+    config.entrypoint.write_text(
+        "import os, pathlib, time\n"
+        f"pathlib.Path({str(child_pid_file)!r}).write_text(str(os.getpid()))\n"
+        "time.sleep(60)\n"
+    )
+    local = _on_free_port(config)
+    monkeypatch.setattr(lifecycle, "STARTUP_TIMEOUT", 1.5)
+
+    with pytest.raises(lifecycle.ServerLifecycleError, match="did not answer"):
+        lifecycle.start(local)
+
+    child_pid = int(child_pid_file.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+    assert child_pid not in lifecycle._OWNED
+    assert not local.pid_file.exists()
+    # The requested scheme outlives the failure on purpose; see the crashed-HTTPS test.

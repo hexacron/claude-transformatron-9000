@@ -72,6 +72,11 @@ class CertificatePair:
 def generate(config: TransformatronConfig, force: bool = False) -> CertificatePair:
     """Create a self-signed certificate for ``localhost`` and ``127.0.0.1``.
 
+    An existing pair is returned untouched unless ``force`` is set: regenerating it would
+    invalidate a certificate the user has already added to their trust store. The pair only
+    counts as existing when both halves are on disk, because a certificate without its key
+    cannot be served and the server would fail at startup instead of here.
+
     Args:
         config: Supplies the certificate output paths.
         force: Overwrite an existing certificate pair.
@@ -80,11 +85,10 @@ def generate(config: TransformatronConfig, force: bool = False) -> CertificatePa
         The certificate paths and the command to trust them.
 
     Raises:
-        CertificateError: If a certificate already exists and ``force`` is unset,
-            or if ``openssl`` fails.
+        CertificateError: If ``openssl`` is missing or fails.
     """
     cert_file, key_file = config.cert_file, config.key_file
-    if cert_file.exists() and not force:
+    if cert_file.exists() and key_file.exists() and not force:
         return CertificatePair(str(cert_file), str(key_file), _trust_command(config))
 
     cert_file.parent.mkdir(parents=True, exist_ok=True)
