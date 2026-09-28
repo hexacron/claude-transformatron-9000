@@ -29,8 +29,8 @@ any agent that can run commands. Both call the same code, so they behave identic
 ## Quick start
 
 ```bash
-git clone <your-fork-url> claude-transformatron-9000
-cd claude-transformatron-9000
+git clone https://github.com/hexacron/transformatron.git
+cd transformatron
 uv sync
 uv run pytest -q
 ```
