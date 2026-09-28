@@ -31,27 +31,33 @@ nothing.
    `transform_settings=`, which raises at import and stops the server booting.
 
    **Confirm the field actually reaches the client**, or a user cannot enter the credential at
-   all. Restart, then check discovery publishes a `transformSettings` array:
+   all. Restart, then check the transform's discovery document carries a `transformSettings`
+   array:
 
    ```bash
-   curl -sk https://127.0.0.1:3000/api/v3/transforms | grep -o '"transformSettings":[^]]*]'
+   uv run python scripts/transformatron_cli.py show <id>
    ```
 
-   A `null` here means Desktop renders no field. Restart before believing it — a stale server
-   serves the old registration and makes correct code look broken.
+   or `get_transform(id)` over MCP. Both use the configured port and the scheme the server was
+   started with, so neither depends on HTTPS. A `null` there means Desktop renders no field.
+   Restart before believing it — a stale server serves the old registration and makes correct code
+   look broken.
 6. **Validate `input_entity.value` before interpolating it** into a URL path, query parameter, or
    subprocess call. It is user-controlled.
 
 ## The loop
 
 ```bash
-# 1. scaffold or edit a module under server/transforms/
-#    - To scaffold a new API: uv run python scripts/transformatron_cli.py scaffold --curl "..."
-#    - Or use the scaffold_transform MCP tool
-# 2. confirm import is in server/project.py (scaffold does this automatically)
+# 1. scaffold, or hand-write a module under server/transforms/
+uv run python scripts/transformatron_cli.py scaffold \
+  --curl 'curl https://internetdb.shodan.io/8.8.8.8' \
+  --sample-response "$(curl -s https://internetdb.shodan.io/8.8.8.8)"
+#    or --openapi <url|path>; POST operations need --operation <id>; --force overwrites
+# 2. confirm the import is in server/project.py (scaffold writes it)
 uv run python scripts/transformatron_cli.py restart          # 3. reload
 uv run python scripts/transformatron_cli.py list             # 4. confirm types
 uv run python scripts/transformatron_cli.py run <id> <type> <value> --setting KEY=VALUE
+# 5. check Entities (N); delete fields nobody needs, fix the mapping, go back to 3
 ```
 
 With the `transformatron` MCP server available, `scaffold_transform`, `server_restart`,
@@ -79,7 +85,8 @@ uv run ty check src tests scripts
 uv run pytest -q
 ```
 
-`server/transforms/` is linted; the rest of `server/` is SDK-generated and excluded.
+`server/transforms/` is linted, scaffolded code included. Only `server/.agents/`,
+`server/project.py` and `server/__init__.py` are SDK-generated and excluded.
 
 ## Routing to the SDK skills
 
@@ -101,7 +108,8 @@ entity selection, pagination, input constraints, TRX migration. Load one at a ti
 - `maltego-transform-build/SKILL.md` §5 "Return Entities"
 - `maltego-transform-basics/references/transform-authoring-patterns.md` §3 "Returning a Graph"
 
-**Port correction:** those skills default to port 8080. This project runs on **3000**.
+**Port correction:** those skills default to port 8080. This project runs on **3000** unless
+`transformatron.toml` sets another.
 
 ## Worked examples
 

@@ -8,8 +8,10 @@ Humans: `README.md` is the friendlier entry point, but nothing here is agent-onl
 
 ## What this project is
 
-An MCP control plane **and CLI** for a single local Maltego v3 transform server. It handles the
-server lifecycle and transform execution. It does not help you write transform code.
+An MCP server **and CLI** for authoring Maltego v3 transforms against a single local transform
+server. It scaffolds a transform module from a cURL command or an OpenAPI spec, then drives the
+server — restart, run, read back the entities — so you can check what you wrote against the live
+API. The scaffold is a first draft; the verify loop is what makes it correct.
 
 ## Before writing a transform
 
@@ -33,10 +35,31 @@ The short version, in the order these bite:
 
 ## The loop
 
-1. Add or edit a module under `server/transforms/`.
+1. **Scaffold** a module package from a spec, or hand-write a module under `server/transforms/`:
+
+   ```bash
+   # From a cURL command. Pass a real response so the outputs are inferred, not guessed.
+   uv run python scripts/transformatron_cli.py scaffold \
+     --curl 'curl https://internetdb.shodan.io/8.8.8.8' \
+     --sample-response "$(curl -s https://internetdb.shodan.io/8.8.8.8)"
+
+   # From an OpenAPI spec, by URL or path. POST operations are skipped unless named with
+   # --operation (repeatable), because they may create or change data.
+   uv run python scripts/transformatron_cli.py scaffold --service demo \
+     --openapi ./demo-openapi.json --operation searchHosts
+   ```
+
+   An existing service is never overwritten unless you pass `--force`, which rewrites the
+   generated files — including any corrections you made to them by hand.
 2. **Import it in `server/project.py`** — the server only registers what `project.py` imports.
-3. Restart the server.
-4. Confirm it registered, then run it.
+   `scaffold` writes the import for you; a hand-written module needs it added.
+3. Restart the server — it only loads code at startup.
+4. Confirm it appears in `list` with the input and output types you expect.
+5. Run it against a real input and **check the entity count**, not the success state.
+6. Delete the output fields nobody needs and fix the mapping wherever the live response disagrees
+   with the spec. The scaffolder maps every field it can see.
+7. Repeat 3–6 until the entities are the ones an investigator wants.
+8. Run the smoke test (below) before calling it done.
 
 ## Driving the server
 
@@ -50,10 +73,15 @@ uv run python scripts/transformatron_cli.py status
 uv run python scripts/transformatron_cli.py restart
 uv run python scripts/transformatron_cli.py list
 uv run python scripts/transformatron_cli.py run <id> maltego.IPv4Address 8.8.8.8
+uv run python scripts/transformatron_cli.py show <id>
 uv run python scripts/transformatron_cli.py logs --lines 100
 ```
 
-`--help` on any subcommand lists its options.
+`--help` on any subcommand lists its options. The CLI exits 0 on success and 1 when the operation
+failed — a start, stop, restart or certificate generation that failed, a server that could not be
+reached (`status` included), a run that did not end in a success state, a refused scaffold, or an
+unusable `transformatron.toml`. A run that completes with zero entities still exits 0: the count
+in the output is the signal, not the exit code.
 
 **MCP** — for agents that speak it (Claude Code is configured in `.mcp.json`): `server_start`,
 `server_stop`, `server_restart`, `server_status`, `server_logs`, `list_transforms`,
@@ -71,6 +99,10 @@ loaded when the session began. The CLI is a fresh process each time and always r
 This applies only to edits under `src/transformatron/`. Editing `server/transforms/` is unaffected:
 `server_restart` restarts the transform server subprocess, which does reload your transform
 modules. You do not need to relaunch a session after changing a transform.
+
+`transformatron.toml` is not code: every tool reads it afresh on each call, so an edit applies on
+the next call without relaunching. The transform server still takes its identity, host and port
+at start, so restart it after changing them.
 
 `/clear` does not help — it resets the conversation but keeps the same process, so the MCP server
 keeps its loaded modules. Use `/exit` and relaunch.
@@ -91,9 +123,11 @@ uv run python scripts/smoke_test_transforms.py --setting API_KEY=xxx
 Runs every registered transform and fails on zero entities or an output type of `NONE`. Run it
 after any change under `server/transforms/`.
 
-Pass credentials with repeated `--setting KEY=VALUE`. A transform that reports a missing setting
-is recorded SKIP rather than FAIL, so an unconfigured key is never mistaken for broken code — but
-it also is not evidence the transform works. Supply the setting to actually exercise it. When the
+Pass credentials with repeated `--setting KEY=VALUE`, or write them to `.env` (copy
+`.env.example`), which the server and the smoke test both read. An exported shell variable
+overrides `.env`, and `--setting` overrides both. A transform that reports a missing setting is
+recorded SKIP rather than FAIL, so an unconfigured key is never mistaken for broken code — but it
+also is not evidence the transform works. Supply the setting to actually exercise it. When the
 per-entity-type sample does not suit a transform, add a `TRANSFORM_SAMPLES` entry keyed by the
 transform id suffix.
 
@@ -109,8 +143,13 @@ uv run ty check src tests scripts
 
 - **Do not edit anything under `server/.agents/skills/` or `.venv/`.** Both are upstream-owned and
   regenerate; corrections belong in `docs/transform-authoring.md`. See `CONTRIBUTING.md`.
-- `server/` is SDK-generated and excluded from linting.
-- The server runs on port **3000**. The SDK's own skill scripts default to 8080.
+- `server/.agents/`, `server/project.py` and `server/__init__.py` are SDK-generated and excluded
+  from linting. The rest of `server/` — `transforms/` (scaffolded code included), `middleware.py`,
+  `discovery.py` — is linted like the rest of the project.
+- The server runs on port **3000** unless `transformatron.toml` sets another. The SDK's own skill
+  scripts default to 8080.
+- macOS and Linux only. The lifecycle relies on POSIX signals; on Windows `os.kill(pid, 0)`
+  terminates the process it is meant to probe.
 - The Maltego desktop client requires HTTPS — plain HTTP fails inside the client with nothing in
   the server log.
 
@@ -119,14 +158,19 @@ uv run ty check src tests scripts
 ```
 src/transformatron/
   operations.py  shared server operations — add new ones here
-  config.py      host, port, scheme, derived URLs and state paths
+  config.py      host, port, scheme, derived URLs and state paths; reads transformatron.toml
   client.py      async v3 protocol client
   lifecycle.py   start/stop/restart/status/logs
   certs.py       self-signed certificate generation
+  envfile.py     reads .env so headless runs can reach credentials
+  scaffold/      spec → module package: parser.py, generator.py, schema.py
   mcp.py         MCP front end
 scripts/
   transformatron_cli.py      CLI front end
   smoke_test_transforms.py   zero-entity gate
 server/          SDK-generated; project.py imports decide what registers
+  transforms/    your transform modules, scaffolded or hand-written
+    local/       gitignored; discovered at startup, for integrations you do not publish
 docs/            transform-authoring.md — read before writing transforms
-```
+transformatron.toml  server name, namespace, author, host, port. Gitignored; copy the .example.
+.env             API keys for headless runs. Gitignored; copy .env.example.
