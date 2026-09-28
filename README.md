@@ -1,5 +1,7 @@
 # transformatron
 
+[![CI](https://github.com/hexacron/transformatron/actions/workflows/ci.yml/badge.svg)](https://github.com/hexacron/transformatron/actions/workflows/ci.yml)
+
 Build [Maltego](https://www.maltego.com/) transforms with a coding agent, against a real server.
 
 Maltego transforms are small functions that take one entity (an IP address, a domain, a person)

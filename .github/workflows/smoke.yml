@@ -1,0 +1,38 @@
+# Runs every registered transform against its live upstream API. Kept out of the PR gate:
+# a third-party outage or an aged-out sample would fail it for reasons unrelated to the
+# change under review. A failure here means an upstream or its data moved, and a sample
+# transform needs a look.
+name: Live smoke test
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    env:
+      # Optional repository secrets. A transform whose key is unset reports SKIP, so with
+      # none configured this exercises the keyless RDAP and ffraud sets. GREYNOISE_API_KEY
+      # is deliberately absent: its free tier allows about 25 lookups a week, which a daily
+      # run would exhaust.
+      CROWDSEC_CTI_API_KEY: ${{ secrets.CROWDSEC_CTI_API_KEY }}
+      IPINFO_API_TOKEN: ${{ secrets.IPINFO_API_TOKEN }}
+      RANSOMWARE_LIVE_API_KEY: ${{ secrets.RANSOMWARE_LIVE_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run python scripts/transformatron_cli.py start
+      - run: uv run python scripts/smoke_test_transforms.py
+      - name: Server log
+        if: always()
+        run: uv run python scripts/transformatron_cli.py logs --lines 200
+      - run: uv run python scripts/transformatron_cli.py stop
+        if: always()
