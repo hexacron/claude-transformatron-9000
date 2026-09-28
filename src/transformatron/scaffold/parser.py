@@ -52,7 +52,10 @@ _CURL_DATA_FLAGS = frozenset(
 _FALLBACK_OUTPUT = OutputFieldMapping(
     field_name="result", entity_type="Phrase", label_prefix="Result: "
 )
-_DISPLAY_SUMMARY_LIMIT = 60
+_DISPLAY_NAME_LIMIT = 80
+_SEARCH_FIELD_RE = re.compile(
+    r"^(q|query|search|term|keyword|keywords|text|name|username|user|value)$", re.I
+)
 
 
 def _slugify(text: str) -> str:
@@ -79,20 +82,20 @@ def _service_id(service_name: str | None, derived: str) -> str:
     import — and a path separator would write outside ``transforms/`` altogether.
     """
     if service_name is not None:
-        if not _SERVICE_NAME_RE.match(service_name):
+        svc_id = _slugify(service_name)
+        if not _SERVICE_NAME_RE.match(service_name) or not _is_identifier(svc_id):
             raise ValueError(
                 f"Service name {service_name!r} is not usable as a package name. Use letters, "
-                "digits, underscores and hyphens, starting with a letter."
+                "digits, underscores and hyphens, starting with a letter, and not a Python "
+                "keyword."
             )
-        svc_id = _slugify(service_name)
-    else:
-        svc_id = derived
-    if not _is_identifier(svc_id):
+        return svc_id
+    if not _is_identifier(derived):
         raise ValueError(
             f"Could not derive a package name from {derived!r}. Pass a service name, e.g. "
             "--service my_api."
         )
-    return svc_id
+    return derived
 
 
 def _function_name(text: str) -> str:
@@ -103,12 +106,19 @@ def _function_name(text: str) -> str:
     return slug if _is_identifier(slug) else f"op_{slug}"
 
 
-def _display_summary(summary: str) -> str:
-    """Shorten an operation summary to something that fits a Maltego menu."""
-    summary = " ".join(summary.split())
-    if len(summary) <= _DISPLAY_SUMMARY_LIMIT:
-        return summary
-    return summary[:_DISPLAY_SUMMARY_LIMIT].rsplit(" ", 1)[0] + "…"
+def _display_name(title: str, summary: str) -> str:
+    """Return ``title: summary`` short enough to fit a Maltego menu and the line limit.
+
+    Measured escaped, because that is how it is written into the generated module: a
+    ``display_name=`` argument longer than the line limit fails the project's lint gate.
+    """
+    name = f"{title}: {' '.join(summary.split())}"
+    if len(json.dumps(name)) - 2 <= _DISPLAY_NAME_LIMIT:
+        return name
+    words = name.split(" ")
+    while words and len(json.dumps(" ".join(words) + "...")) - 2 > _DISPLAY_NAME_LIMIT:
+        words.pop()
+    return " ".join(words) + "..." if words else name[: _DISPLAY_NAME_LIMIT - 3] + "..."
 
 
 def _load_sample(sample_response: Any) -> Any:
@@ -250,12 +260,19 @@ def parse_curl_command(
     typed.sort(key=lambda c: entity_of(c) == "Domain")
     chosen = typed[0] if typed else None
     if chosen is None:
-        body_fields = [c for c in candidates if c[0] == "body"]
-        if len(query) == 1:
-            chosen = next(c for c in candidates if c[0] == "query")
-        elif len(body_fields) == 1:
+        # No field looks like an entity, so this is a free-text endpoint. A field named like
+        # a search term wins, then a lone query or body field, then any non-numeric text
+        # field (`limit=5` is a setting, not the input). A path segment is the last resort,
+        # since it is usually the resource rather than the thing looked up.
+        fields = [c for c in candidates if c[0] != "path"]
+        body_fields = [c for c in fields if c[0] == "body"]
+        chosen = next((c for c in fields if _SEARCH_FIELD_RE.match(str(c[1]))), None)
+        if chosen is None and len(query) == 1:
+            chosen = next(c for c in fields if c[0] == "query")
+        if chosen is None and len(body_fields) == 1:
             chosen = body_fields[0]
-        elif segments:
+        chosen = chosen or next((c for c in fields if c[2] and not c[2].isdigit()), None)
+        if chosen is None and segments:
             chosen = ("path", len(segments) - 1, unquote(segments[-1]))
     if chosen is None:
         raise ValueError(
@@ -483,6 +500,13 @@ def parse_openapi_spec(
             auth_query_param = scheme["name"] if location == "query" else None
             break
         unsupported.append(f"{scheme_name} ({scheme_type or 'unknown'})")
+    if auth_type == "none":
+        # Some specs declare no scheme and instead list the key as an ordinary query
+        # parameter on every operation. Treated as data, it would be sent as a literal
+        # placeholder or even chosen as the input, so it is recognised as auth here.
+        auth_query_param = _declared_key_param(resolver, document)
+        if auth_query_param:
+            auth_type = "query"
     if auth_type == "none" and unsupported:
         notes.append(
             f"The spec's authentication ({', '.join(unsupported)}) is not scaffolded; "
@@ -515,7 +539,14 @@ def parse_openapi_spec(
                 continue
 
             transform, reason = _openapi_transform(
-                resolver, path_str, http_method, operation, shared_params, transform_id, title
+                resolver,
+                path_str,
+                http_method,
+                operation,
+                shared_params,
+                transform_id,
+                title,
+                auth_query_param,
             )
             if transform is None:
                 notes.append(f"Skipped {op_key}: {reason}")
@@ -551,6 +582,43 @@ def parse_openapi_spec(
     )
 
 
+def _operations(spec: _Spec, document: dict[str, Any]) -> list[tuple[list[Any], dict[str, Any]]]:
+    """Return (path-level parameters, operation) for every GET and POST operation."""
+    found = []
+    for raw_item in (document.get("paths") or {}).values():
+        path_item = spec.resolve(raw_item)
+        if not isinstance(path_item, dict):
+            continue
+        for http_method in ("get", "post"):
+            operation = spec.resolve(path_item.get(http_method))
+            if isinstance(operation, dict) and operation:
+                found.append((path_item.get("parameters") or [], operation))
+    return found
+
+
+def _declared_key_param(spec: _Spec, document: dict[str, Any]) -> str | None:
+    """Return a key-like query parameter every operation declares, if there is one.
+
+    Requiring it on every operation keeps an ordinary field that happens to be called
+    ``token`` (a pagination cursor, say) from being mistaken for the credential.
+    """
+    operations = _operations(spec, document)
+    if not operations:
+        return None
+    per_operation = [
+        {
+            param["name"]
+            for raw in [*shared, *(operation.get("parameters") or [])]
+            if isinstance(param := spec.resolve(raw), dict)
+            and param.get("in") == "query"
+            and _AUTH_QUERY_RE.match(str(param.get("name", "")))
+        }
+        for shared, operation in operations
+    ]
+    common = set.intersection(*per_operation)
+    return min(common) if common else None
+
+
 def _openapi_transform(
     spec: _Spec,
     path_str: str,
@@ -559,23 +627,46 @@ def _openapi_transform(
     shared_params: list[Any],
     transform_id: str,
     title: str,
+    auth_query_param: str | None,
 ) -> tuple[ScaffoldTransformConfig | None, str]:
     """Build one transform from an operation, or return why it cannot be scaffolded."""
     # Operation-level parameters override path-level ones with the same name and location.
     merged: dict[tuple[str, str], dict[str, Any]] = {}
     for raw in [*shared_params, *(operation.get("parameters") or [])]:
         param = spec.resolve(raw)
-        if isinstance(param, dict) and param.get("name") and param.get("in") in ("path", "query"):
+        if isinstance(param, dict) and param.get("name") and param.get("in"):
             merged[(param["name"], param["in"])] = param
-    params = list(merged.values())
+    # The credential is sent by api.py; as an ordinary parameter it would go out as a
+    # placeholder value, or be chosen as the input.
+    params = [
+        p
+        for p in merged.values()
+        if p["in"] in ("path", "query")
+        and not (p["in"] == "query" and p["name"] == auth_query_param)
+    ]
 
+    # The body: an OpenAPI 3 requestBody, or a Swagger 2 `in: body` / `in: formData` param.
     body_schema: dict[str, Any] = {}
+    body_encoding = "json"
+    body_required: set[str] = set()
+    body_example: dict[str, Any] | None = None
     request_body = spec.resolve(operation.get("requestBody") or {})
-    if isinstance(request_body, dict):
+    swagger_body = next((p for p in merged.values() if p["in"] == "body"), None)
+    form_params = [p for p in merged.values() if p["in"] == "formData"]
+    if isinstance(request_body, dict) and request_body:
         body_schema = spec.resolve(_json_content(request_body).get("schema", {})) or {}
-    body_example = spec.example(body_schema) if body_schema else None
-    if not isinstance(body_example, dict):
-        body_example = None
+    elif swagger_body is not None:
+        body_schema = spec.resolve(swagger_body.get("schema", {})) or {}
+    if body_schema:
+        example = spec.example(body_schema)
+        body_example = example if isinstance(example, dict) else None
+        body_required = set(body_schema.get("required") or [])
+    elif form_params:
+        body_encoding = "form"
+        body_example = {
+            p["name"]: _parameter_value(spec, p) or spec.example(p) or "" for p in form_params
+        }
+        body_required = {p["name"] for p in form_params if p.get("required")}
 
     # Input: an entity-like parameter or body field, then a required path parameter, then
     # any required parameter, then any parameter at all.
@@ -623,7 +714,7 @@ def _openapi_transform(
         body = {
             name: value
             for name, value in body_example.items()
-            if name == input_name or name in (body_schema.get("required") or [])
+            if name == input_name or name in body_required
         }
 
     responses = operation.get("responses") or {}
@@ -641,7 +732,7 @@ def _openapi_transform(
     return (
         ScaffoldTransformConfig(
             transform_id=transform_id,
-            display_name=f"{title}: {_display_summary(summary)}",
+            display_name=_display_name(title, summary),
             input_entity=entity_of(chosen),
             endpoint_path=endpoint_path,
             input_param_name=input_name if location != "path" else "target",
@@ -651,6 +742,7 @@ def _openapi_transform(
             description=str(operation.get("description") or summary),
             query_params=query,
             request_body=body,
+            body_encoding=body_encoding,
             response_is_list=response_is_list,
         ),
         "",

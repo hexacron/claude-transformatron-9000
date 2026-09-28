@@ -11,6 +11,7 @@ import sys
 import time
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 
@@ -72,9 +73,11 @@ def _is_our_server(config: TransformatronConfig, pid: int) -> bool:
     A pid file outlives its process, and the kernel recycles pids, so after a crash or a
     reboot the recorded pid can name an unrelated process. Signalling it would kill
     something the user never asked us to touch, so a live pid is only trusted once its
-    command line shows it is running our entrypoint. ``ps`` is consulted rather than
-    ``/proc`` because it answers the same way on macOS and Linux. If ``ps`` cannot be run
-    the process is treated as foreign: refusing to act is recoverable, a wrong kill is not.
+    command line has the exact shape ``start`` launches: a Python interpreter running the
+    entrypoint as its script. Merely mentioning the file is not enough — ``vim project.py``
+    must not be stopped. ``ps`` is consulted rather than ``/proc`` because it answers the
+    same way on macOS and Linux. If ``ps`` cannot be run the process is treated as foreign:
+    refusing to act is recoverable, a wrong kill is not.
     """
     if pid in _OWNED:
         return True
@@ -87,7 +90,9 @@ def _is_our_server(config: TransformatronConfig, pid: int) -> bool:
         )
     except OSError:
         return False
-    return config.entrypoint.name in result.stdout.split()
+    # Split on the last space only: the interpreter path may itself contain spaces.
+    interpreter, _, script = result.stdout.strip().rpartition(" ")
+    return script == config.entrypoint.name and Path(interpreter).name.lower().startswith("python")
 
 
 def read_pid(config: TransformatronConfig) -> int | None:
@@ -333,16 +338,18 @@ def _clear_state(config: TransformatronConfig) -> None:
 def _await_healthy(config: TransformatronConfig, process: subprocess.Popen) -> ServerStatus:
     """Wait for the server to answer, failing fast if the process dies.
 
-    A failed start must leave nothing behind: a child that never answers is terminated
-    and its state files removed, so the next start is not refused by a server that
-    cannot be reached.
+    A failed start leaves no process and no pid file, so the next start is not refused by
+    a server that cannot be reached. The scheme file is kept: it records the scheme the
+    caller asked for, and the usual reason for a failed start is a transform that did not
+    import. Dropping it would bring the fixed server back on plain HTTP at the next
+    ``restart``, which the Maltego desktop client rejects without a trace in the log.
     """
     base_url = resolve_config(config).base_url
     deadline = time.monotonic() + STARTUP_TIMEOUT
     while time.monotonic() < deadline:
         if process.poll() is not None:
             _OWNED.pop(process.pid, None)
-            _clear_state(config)
+            config.pid_file.unlink(missing_ok=True)
             raise ServerLifecycleError(
                 f"Server exited immediately with code {process.returncode}. "
                 f"Recent log output:\n{tail_log(config, 30)}"
@@ -359,7 +366,7 @@ def _await_healthy(config: TransformatronConfig, process: subprocess.Popen) -> S
         time.sleep(HEALTH_POLL_INTERVAL)
 
     _terminate(process.pid)
-    _clear_state(config)
+    config.pid_file.unlink(missing_ok=True)
     raise ServerLifecycleError(
         f"Server did not answer at {base_url} within {STARTUP_TIMEOUT:g}s and was "
         f"stopped. Recent log output:\n{tail_log(config, 30)}"

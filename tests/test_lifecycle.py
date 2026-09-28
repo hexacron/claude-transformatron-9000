@@ -12,7 +12,7 @@ from collections.abc import Iterator
 import httpx
 import pytest
 
-from transformatron import lifecycle
+from transformatron import certs, lifecycle
 from transformatron.config import TransformatronConfig
 
 
@@ -84,6 +84,22 @@ def test_read_pid_does_not_trust_a_foreign_process(config: TransformatronConfig)
 
     assert lifecycle.read_pid(config) is None
     assert not config.pid_file.exists()
+
+
+def test_read_pid_does_not_trust_a_process_that_merely_opens_the_entrypoint(
+    config: TransformatronConfig,
+) -> None:
+    """An editor or pager holding project.py open is not the server and must not be stopped."""
+    config.entrypoint.write_text("")
+    viewer = subprocess.Popen(["tail", "-f", config.entrypoint.name], cwd=config.project_dir)
+    try:
+        config.state_dir.mkdir(parents=True)
+        config.pid_file.write_text(str(viewer.pid))
+
+        assert lifecycle.read_pid(config) is None
+    finally:
+        viewer.kill()
+        viewer.wait()
 
 
 @pytest.mark.parametrize("recorded", ["0", "-1"])
@@ -443,7 +459,7 @@ def test_refused_https_start_records_no_scheme(config: TransformatronConfig) -> 
     assert not config.pid_file.exists()
 
 
-def test_crashed_start_clears_its_state(config: TransformatronConfig) -> None:
+def test_crashed_start_clears_its_pid(config: TransformatronConfig) -> None:
     config.entrypoint.write_text("raise SystemExit(3)\n")
     local = _on_free_port(config)
 
@@ -451,7 +467,24 @@ def test_crashed_start_clears_its_state(config: TransformatronConfig) -> None:
         lifecycle.start(local, ssl=False)
 
     assert not local.pid_file.exists()
-    assert not local.scheme_file.exists()
+
+
+def test_crashed_https_start_keeps_https_for_the_next_restart(
+    config: TransformatronConfig,
+) -> None:
+    """A transform that fails to import must not turn the fixed server into an HTTP one.
+
+    The Maltego desktop client rejects plain HTTP without a trace in the server log, so a
+    restart after fixing the import has to come back on the scheme that was asked for.
+    """
+    local = _on_free_port(config)
+    certs.generate(local)
+    local.entrypoint.write_text("raise SystemExit(3)\n")
+
+    with pytest.raises(lifecycle.ServerLifecycleError, match="exited immediately"):
+        lifecycle.start(local, ssl=True)
+
+    assert lifecycle.read_scheme(local) == "https"
 
 
 def test_start_timeout_leaves_nothing_running_or_recorded(
@@ -475,4 +508,4 @@ def test_start_timeout_leaves_nothing_running_or_recorded(
         os.kill(child_pid, 0)
     assert child_pid not in lifecycle._OWNED
     assert not local.pid_file.exists()
-    assert not local.scheme_file.exists()
+    # The requested scheme outlives the failure on purpose; see the crashed-HTTPS test.

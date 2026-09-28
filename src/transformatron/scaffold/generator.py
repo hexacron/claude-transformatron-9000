@@ -10,7 +10,9 @@ module at startup, one bad module takes every transform on the server down with 
 from __future__ import annotations
 
 import json
+import math
 import textwrap
+import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -95,11 +97,13 @@ def _lit(text: str) -> str:
     """Return a Python string literal for ``text``, quoted the way ``ruff format`` would.
 
     JSON string escaping is valid Python string escaping, so the body is safe for any
-    input. Ruff prefers double quotes unless the text holds more of them than single
-    quotes, in which case it switches to avoid escapes — matching that keeps
-    ``ruff format --check`` passing on generated code.
+    input. Non-ASCII characters are escaped too: a curly apostrophe or an en dash from a
+    spec title is a ruff RUF001 violation when written literally, and the escape renders
+    the same text at run time. Ruff prefers double quotes unless the text holds more of
+    them than single quotes, in which case it switches to avoid escapes — matching that
+    keeps ``ruff format --check`` passing on generated code.
     """
-    body = json.dumps(text, ensure_ascii=False)[1:-1]
+    body = json.dumps(text)[1:-1]
     if text.count('"') > text.count("'"):
         body = body.replace('\\"', '"').replace("'", "\\'")
         return f"'{body}'"
@@ -139,6 +143,10 @@ def _flat(value: Any) -> str:
         return _lit(value)
     if isinstance(value, bool) or value is None:
         return repr(value)
+    if isinstance(value, float) and not math.isfinite(value):
+        # json.loads accepts NaN and Infinity, whose repr() is a bare name that does not
+        # exist at run time; the module would fail to import and take the server down.
+        return f'float("{value!r}")'
     if isinstance(value, int | float):
         return repr(value)
     if isinstance(value, dict):
@@ -169,9 +177,19 @@ def _render(value: Any, indent: int, head: str, tail: str) -> list[str]:
     return lines
 
 
+# Typographic characters common in spec prose, folded to the ASCII ruff expects in
+# docstrings (RUF002). Anything else outside ASCII is dropped from docstrings, which are
+# documentation only; literals keep the full text through escapes instead.
+_DOCSTRING_FOLD = str.maketrans(
+    {"\u2018": "'", "\u2019": "'", "\u201c": "'", "\u201d": "'", "\u2013": "-", "\u2014": "-"}
+)
+
+
 def _docstring(text: str, indent: int) -> str:
     """Return a docstring holding ``text``, safe for any content and within the line limit."""
-    collapsed = " ".join(text.replace("\\", "/").replace('"', "'").split()) or "Transform."
+    folded = unicodedata.normalize("NFKD", text.translate(_DOCSTRING_FOLD))
+    ascii_text = folded.encode("ascii", "ignore").decode()
+    collapsed = " ".join(ascii_text.replace("\\", "/").replace('"', "'").split()) or "Transform."
     pad = " " * indent
     lines = textwrap.wrap(collapsed, width=_LINE_LIMIT - indent - 6)
     if len(lines) == 1:
@@ -180,13 +198,36 @@ def _docstring(text: str, indent: int) -> str:
     return f'{pad}"""{lines[0]}\n{body}\n{pad}"""'
 
 
-def _append(indent: int, constructor: str) -> list[str]:
-    """Return a ``results.append(...)`` statement, wrapped the way ruff would wrap it."""
+def _append(indent: int, entity: str, value: str) -> list[str]:
+    """Return ``results.append(Entity(value=...))``, wrapped the way ruff would wrap it.
+
+    Ruff splits the outer call first and, if the constructor still does not fit on its
+    own line, the constructor's argument list too.
+    """
     pad = " " * indent
+    constructor = f"{entity}(value={value})"
     single = f"{pad}results.append({constructor})"
     if len(single) <= _LINE_LIMIT:
         return [single]
-    return [f"{pad}results.append(", f"{pad}    {constructor}", f"{pad})"]
+    if len(f"{pad}    {constructor}") <= _LINE_LIMIT:
+        return [f"{pad}results.append(", f"{pad}    {constructor}", f"{pad})"]
+    return [
+        f"{pad}results.append(",
+        f"{pad}    {entity}(",
+        f"{pad}        value={value},",
+        f"{pad}    )",
+        f"{pad})",
+    ]
+
+
+def _get(indent: int, target: str, source: str, key: str) -> list[str]:
+    """Return ``target = source.get("key")``, split onto three lines if it is too long."""
+    pad = " " * indent
+    literal = _lit(key)
+    single = f"{pad}{target} = {source}.get({literal})"
+    if len(single) <= _LINE_LIMIT:
+        return [single]
+    return [f"{pad}{target} = {source}.get(", f"{pad}    {literal}", f"{pad})"]
 
 
 # ---------------------------------------------------------------------------------------
@@ -338,31 +379,29 @@ def _camel(snake: str) -> str:
     return "".join(part.title() for part in snake.split("_") if part)
 
 
-def _format_entity_import(names: list[str]) -> str:
-    """Render the `from maltego.entities import ...` body, wrapping when it would be long.
+def _format_import(module: str, names: list[str]) -> str:
+    """Render ``from module import ...``, wrapping one name per line when it would be long.
 
-    A response with many mapped fields pushes the single-line form past the project's
-    100-character limit (E501) and ruff's formatter then rewrites it, failing
-    `ruff format --check` on freshly generated code.
+    A response with many mapped fields, or a long service id, pushes the single-line form
+    past the project's 100-character limit (E501), and ruff's formatter then rewrites it,
+    failing ``ruff format --check`` on freshly generated code.
     """
-    single_line = ", ".join(names)
-    if len(f"from maltego.entities import {single_line}") <= _LINE_LIMIT:
+    single_line = f"from {module} import {', '.join(names)}"
+    if len(single_line) <= _LINE_LIMIT:
         return single_line
     joined = "".join(f"    {name},\n" for name in names)
-    return f"(\n{joined})"
+    return f"from {module} import (\n{joined})"
 
 
-def _entity_expr(mapping: OutputFieldMapping, var: str) -> str:
-    """Return the constructor call for one mapped value held in ``var``."""
+def _value_expr(mapping: OutputFieldMapping, var: str) -> str:
+    """Return the expression turning the raw value in ``var`` into an entity value."""
     if mapping.entity_type == "Phrase" and mapping.label_prefix:
-        value = _fstring(mapping.label_prefix, var)
-    elif mapping.strip_prefix:
-        value = f"str({var}).removeprefix({_lit(mapping.strip_prefix)})"
-    elif mapping.entity_type in ("Domain", "DNSName"):
-        value = f'str({var}).rstrip(".")'
-    else:
-        value = f"str({var})"
-    return f"{mapping.entity_type}(value={value})"
+        return _fstring(mapping.label_prefix, var)
+    if mapping.strip_prefix:
+        return f"str({var}).removeprefix({_lit(mapping.strip_prefix)})"
+    if mapping.entity_type in ("Domain", "DNSName"):
+        return f'str({var}).rstrip(".")'
+    return f"str({var})"
 
 
 def _present(mapping: OutputFieldMapping, var: str) -> str:
@@ -377,36 +416,39 @@ def _present(mapping: OutputFieldMapping, var: str) -> str:
 def _extraction(mapping: OutputFieldMapping, source: str, indent: int) -> list[str]:
     """Return the statements that turn one mapped field of ``source`` into entities."""
     pad = " " * indent
-    key = _lit(mapping.field_name)
+    entity = mapping.entity_type
     if mapping.is_list:
         lines = [
-            f"{pad}items = {source}.get({key})",
+            *_get(indent, "items", source, mapping.field_name),
             f"{pad}if isinstance(items, list):",
             f"{pad}    for item in items[:MAX_ITEMS]:",
         ]
         if mapping.sub_field is None:
             lines.append(f"{pad}        if {_present(mapping, 'item')}:")
-            lines.extend(_append(indent + 12, _entity_expr(mapping, "item")))
+            lines.extend(_append(indent + 12, entity, _value_expr(mapping, "item")))
         else:
             lines += [
                 f"{pad}        if not isinstance(item, dict):",
                 f"{pad}            continue",
-                f"{pad}        value = item.get({_lit(mapping.sub_field)})",
+                *_get(indent + 8, "value", "item", mapping.sub_field),
                 f"{pad}        if {_present(mapping, 'value')}:",
             ]
-            lines.extend(_append(indent + 12, _entity_expr(mapping, "value")))
+            lines.extend(_append(indent + 12, entity, _value_expr(mapping, "value")))
         return lines
     if mapping.sub_field is not None:
         lines = [
-            f"{pad}nested = {source}.get({key})",
+            *_get(indent, "nested", source, mapping.field_name),
             f"{pad}if isinstance(nested, dict):",
-            f"{pad}    value = nested.get({_lit(mapping.sub_field)})",
+            *_get(indent + 4, "value", "nested", mapping.sub_field),
             f"{pad}    if {_present(mapping, 'value')}:",
         ]
-        lines.extend(_append(indent + 8, _entity_expr(mapping, "value")))
+        lines.extend(_append(indent + 8, entity, _value_expr(mapping, "value")))
         return lines
-    lines = [f"{pad}value = {source}.get({key})", f"{pad}if {_present(mapping, 'value')}:"]
-    lines.extend(_append(indent + 4, _entity_expr(mapping, "value")))
+    lines = [
+        *_get(indent, "value", source, mapping.field_name),
+        f"{pad}if {_present(mapping, 'value')}:",
+    ]
+    lines.extend(_append(indent + 4, entity, _value_expr(mapping, "value")))
     return lines
 
 
@@ -456,7 +498,6 @@ def generate_transform_module(
 
     output_types = sorted(set(transform.output_entity_types), key=_isort_key)
     needed_entities = {transform.input_entity} | set(output_types)
-    entities_import_str = _format_entity_import(sorted(needed_entities, key=_isort_key))
 
     # A transform emitting many entity types produces a union too long to inline at both
     # the return annotation and the results declaration (E501). Naming it once keeps both
@@ -500,7 +541,6 @@ def generate_transform_module(
         api_imports.append("MAX_ITEMS")
     if config.auth_key_name:
         api_imports.append("api_key_setting")
-    api_imports_str = ", ".join(sorted(api_imports, key=_isort_key))
     quote_import_str = "from urllib.parse import quote\n" if uses_quote else ""
 
     if transform.response_is_list:
@@ -526,10 +566,10 @@ def generate_transform_module(
 
 from typing import Any
 {quote_import_str}
-from maltego.entities import {entities_import_str}
+{_format_import("maltego.entities", sorted(needed_entities, key=_isort_key))}
 from maltego.model.context import MaltegoContext
 {constraint_import_str}from maltego.server import register_transform
-from transforms.{config.service_id}.api import {api_imports_str}
+{_format_import(f"transforms.{config.service_id}.api", sorted(api_imports, key=_isort_key))}
 
 {alias_decl}@register_transform(
     display_name={_lit(transform.display_name)},
@@ -577,16 +617,18 @@ def generate_service_code(config: ScaffoldServiceConfig) -> dict[str, str]:
         # Distinct operations can slugify to the same id ("do scan" and "do-scan" both
         # become do_scan). Keying the dict on that alone silently dropped every transform
         # but the last, and the function name collided inside the module too, so the
-        # server registered one of them. Suffix the duplicates instead.
-        seen: dict[str, int] = {}
+        # server registered one of them. Suffix the duplicates instead. `api` is taken by
+        # the shared client: an operation named "API" would otherwise overwrite it, and
+        # every sibling's `from .api import fetch` would fail at server startup.
+        used = {"api"}
         for t in config.transforms:
-            base_id = t.transform_id
-            seen[base_id] = seen.get(base_id, 0) + 1
-            if seen[base_id] == 1:
-                files[f"{base_id}.py"] = generate_transform_module(config, t)
-                continue
-            unique = replace(t, transform_id=f"{base_id}_{seen[base_id]}")
-            files[f"{unique.transform_id}.py"] = generate_transform_module(config, unique)
+            name, n = t.transform_id, 1
+            while name in used:
+                n += 1
+                name = f"{t.transform_id}_{n}"
+            used.add(name)
+            unique = t if name == t.transform_id else replace(t, transform_id=name)
+            files[f"{name}.py"] = generate_transform_module(config, unique)
 
     return files
 

@@ -39,7 +39,8 @@ nothing.
    ```
 
    or `get_transform(id)` over MCP. Both use the configured port and the scheme the server was
-   started with, so neither depends on HTTPS. A `null` there means Desktop renders no field.
+   started with, so neither depends on HTTPS. An empty `transformSettings` array there means
+   Desktop renders no field.
    Restart before believing it — a stale server serves the old registration and makes correct code
    look broken.
 6. **Validate `input_entity.value` before interpolating it** into a URL path, query parameter, or

@@ -253,8 +253,22 @@ def infer_output_entity(field_name: str, sample_val: Any = None) -> OutputFieldM
     return mapping
 
 
+_LABEL_LIMIT = 40
+
+
 def _title(key: str) -> str:
     return key.replace("_", " ").title()
+
+
+def _label(text: str) -> str:
+    """Return ``text: `` as a Phrase label, shortened so it fits a line of generated code.
+
+    The label only prefixes a value for a reader; a key long enough to push the generated
+    ``Phrase(value=f"...")`` past the line limit would fail the project's lint gate.
+    """
+    if len(text) > _LABEL_LIMIT:
+        text = text[: _LABEL_LIMIT - 3].rstrip() + "..."
+    return f"{text}: "
 
 
 def infer_output_mappings(record: dict[str, Any]) -> list[OutputFieldMapping]:
@@ -274,7 +288,7 @@ def infer_output_mappings(record: dict[str, Any]) -> list[OutputFieldMapping]:
                 if isinstance(sub_value, dict | list):
                     continue
                 mapping = infer_output_entity(sub_key, sub_value)
-                label = f"{_title(key)} {_title(sub_key)}: " if mapping.label_prefix else ""
+                label = _label(f"{_title(key)} {_title(sub_key)}") if mapping.label_prefix else ""
                 mappings.append(
                     replace(mapping, field_name=key, sub_field=sub_key, label_prefix=label)
                 )
@@ -361,10 +375,9 @@ def _infer_output_by_name(field_name: str, is_list: bool) -> OutputFieldMapping:
         return OutputFieldMapping(field_name=key, entity_type="WHOISRecord", is_list=is_list)
 
     # Format human-readable title for Phrase
-    title = key.replace("_", " ").title()
     return OutputFieldMapping(
         field_name=key,
         entity_type="Phrase",
-        label_prefix=f"{title}: ",
+        label_prefix=_label(_title(key)),
         is_list=is_list,
     )
