@@ -17,10 +17,11 @@ a spec, restart, run it, see the entities, fix what the spec got wrong.
 Everything works two ways: an **MCP server** for agents that speak it, and a **CLI** for humans and
 any agent that can run commands. Both call the same code, so they behave identically.
 
-> **Status:** early. Built and verified against a live server on macOS; Linux should work but has
-> not been exercised. **Windows is not supported** — the lifecycle relies on POSIX signals, and its
-> `os.kill(pid, 0)` liveness probe would terminate the server there. Not published to PyPI. Expect
-> rough edges.
+> **Status:** early. Verified on macOS and Linux: CI runs the full suite on Ubuntu and macOS with
+> Python 3.13 and 3.14, and a daily job starts a live server on Ubuntu and runs the keyless
+> transforms against their real APIs. The Maltego desktop client has been exercised on macOS only.
+> **Windows is not supported** — the lifecycle relies on POSIX signals, and its `os.kill(pid, 0)`
+> liveness probe would terminate the server there. Not published to PyPI. Expect rough edges.
 
 ## Requirements
 
