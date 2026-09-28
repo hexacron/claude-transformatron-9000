@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -419,7 +420,7 @@ def test_openapi_path_parameter_is_not_turned_into_a_query_param() -> None:
     code = generate_transform_module(cfg, cfg.transforms[0])
 
     assert 'path = f"/api/v1/hostname/{target}"' in code
-    assert "params = None" in code
+    assert "params=" not in code
 
 
 def test_generated_entity_imports_are_isort_ordered() -> None:
@@ -730,6 +731,9 @@ def test_colliding_transform_ids_are_all_generated() -> None:
     assert "async def do_scan_2(" in files["do_scan_2.py"]
 
 
+_QUERY_Q = {"name": "q", "in": "query", "required": True}
+
+
 def test_generate_service_code_does_not_mutate_config() -> None:
     """Deduplicating filenames must not rewrite the caller's transform ids."""
     cfg = parse_openapi_spec(
@@ -738,8 +742,8 @@ def test_generate_service_code_does_not_mutate_config() -> None:
             "info": {"title": "Dup2", "version": "1.0.0"},
             "servers": [{"url": "https://dup2.example"}],
             "paths": {
-                "/a": {"get": {"operationId": "x y", "parameters": [], "responses": {}}},
-                "/b": {"get": {"operationId": "x-y", "parameters": [], "responses": {}}},
+                "/a": {"get": {"operationId": "x y", "parameters": [_QUERY_Q], "responses": {}}},
+                "/b": {"get": {"operationId": "x-y", "parameters": [_QUERY_Q], "responses": {}}},
             },
         },
         service_name="dup2",
@@ -773,3 +777,198 @@ def test_scaffold_reports_malformed_openapi_spec(tmp_path: Path) -> None:
     result = operations.scaffold(config, service="broken", openapi="{not json at all")
 
     assert "Failed to scaffold" in result
+
+
+def test_scaffold_force_overwrites_an_existing_service(tmp_path: Path) -> None:
+    """The overwrite escape hatch the clash message points at is reachable from the front end."""
+    config = TransformatronConfig(project_dir=tmp_path / "server", state_dir=tmp_path / "state")
+    config.project_dir.mkdir(parents=True)
+    curl = "curl https://api.threat.com/v1/domain/example.com"
+    operations.scaffold(config, service="threat", curl=curl)
+    lookup = config.project_dir / "transforms" / "threat" / "lookup.py"
+    lookup.write_text("# hand-written\n")
+
+    result = operations.scaffold(config, service="threat", curl=curl, force=True)
+
+    assert "Scaffolded" in result
+    assert not lookup.read_text().startswith("# hand-written")
+
+
+@pytest.mark.parametrize("name", ["../escape", "a/b", "1abc", "class", "with space"])
+def test_service_names_that_cannot_be_packages_are_rejected(name: str) -> None:
+    """The service id becomes a directory and a dotted import; a bad one breaks startup."""
+    with pytest.raises(ValueError, match=r"not usable|Could not derive"):
+        parse_curl_command("curl https://api.x.example/ip/8.8.8.8", service_name=name)
+
+
+def test_hyphenated_service_name_becomes_a_package_name() -> None:
+    cfg = parse_curl_command("curl https://api.x.example/ip/8.8.8.8", service_name="my-svc")
+
+    assert cfg.service_id == "my_svc"
+
+
+def test_curl_without_credentials_scaffolds_a_keyless_client() -> None:
+    """A public API must not be gated on a key the request never sent."""
+    cfg = parse_curl_command("curl https://internetdb.shodan.io/8.8.8.8")
+
+    assert cfg.auth_key_name is None
+    assert "API_KEY" not in generate_api_module(cfg)
+
+
+def test_key_in_the_query_string_is_auth_not_input() -> None:
+    cfg = parse_curl_command("curl 'https://api.q.example/lookup?apikey=abc&ip=1.1.1.1'")
+    transform = cfg.transforms[0]
+
+    assert (cfg.auth_type, cfg.auth_query_param) == ("query", "apikey")
+    assert (transform.input_location, transform.input_param_name) == ("query", "ip")
+    assert "apikey" not in transform.query_params
+
+
+def test_resource_names_in_the_path_are_not_taken_for_domains() -> None:
+    """`lookup.json` matches the domain pattern but is the endpoint, not the input."""
+    cfg = parse_curl_command("curl https://api.x.example/v2/lookup.json/8.8.8.8")
+
+    assert cfg.transforms[0].endpoint_path == "/v2/lookup.json/{target}"
+    assert cfg.transforms[0].input_entity == "IPv4Address"
+
+
+def test_sample_response_that_is_not_json_is_reported() -> None:
+    with pytest.raises(ValueError, match="not valid JSON"):
+        parse_curl_command("curl https://api.x.example/ip/8.8.8.8", sample_response="<html>")
+
+
+def _two_operation_spec() -> dict[str, Any]:
+    ok = {"200": {"content": {"application/json": {"schema": {"type": "object"}}}}}
+    return {
+        "openapi": "3.0.0",
+        "info": {"title": "Two", "version": "1"},
+        "servers": [{"url": "https://two.example"}],
+        "paths": {
+            "/things/{id}": {
+                "get": {
+                    "operationId": "getThing",
+                    "parameters": [{"name": "id", "in": "path", "required": True}],
+                    "responses": ok,
+                }
+            },
+            "/things": {
+                "post": {
+                    "operationId": "createThing",
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["owner"],
+                                    "properties": {
+                                        "domain": {"type": "string"},
+                                        "owner": {"type": "string", "example": "me"},
+                                        "note": {"type": "string"},
+                                    },
+                                }
+                            }
+                        }
+                    },
+                    "responses": ok,
+                }
+            },
+        },
+    }
+
+
+def test_post_operations_are_skipped_unless_named() -> None:
+    """A POST may create or change data upstream, so scaffolding one is a deliberate choice."""
+    cfg = parse_openapi_spec(_two_operation_spec())
+
+    assert [t.transform_id for t in cfg.transforms] == ["get_thing"]
+    assert any("createThing" in note for note in cfg.notes)
+
+
+def test_named_post_operation_is_scaffolded_with_its_body() -> None:
+    cfg = parse_openapi_spec(_two_operation_spec(), operations=["createThing"])
+    [transform] = cfg.transforms
+
+    assert transform.http_method == "POST"
+    assert (transform.input_location, transform.input_param_name) == ("body", "domain")
+    # Required fields ride along with their example; optional ones are left out.
+    assert transform.request_body is not None
+    assert set(transform.request_body) == {"domain", "owner"}
+    assert transform.request_body["owner"] == "me"
+
+
+def test_unknown_operation_name_is_an_error() -> None:
+    with pytest.raises(ValueError, match="deleteEverything"):
+        parse_openapi_spec(_two_operation_spec(), operations=["deleteEverything"])
+
+
+def test_operation_whose_path_cannot_be_filled_is_skipped_with_a_reason() -> None:
+    spec = _two_operation_spec()
+    spec["paths"]["/zones/{zone}/hosts"] = {
+        "get": {
+            "operationId": "listHosts",
+            "parameters": [
+                {"name": "zone", "in": "path", "required": True},
+                {"name": "ip", "in": "query", "required": True},
+            ],
+        }
+    }
+
+    cfg = parse_openapi_spec(spec)
+
+    assert "list_hosts" not in [t.transform_id for t in cfg.transforms]
+    assert any("listHosts" in note and "{zone}" in note for note in cfg.notes)
+
+
+def test_unsupported_auth_is_reported_instead_of_guessed() -> None:
+    spec = _two_operation_spec()
+    spec["components"] = {"securitySchemes": {"oauth": {"type": "oauth2"}}}
+
+    cfg = parse_openapi_spec(spec)
+
+    assert cfg.auth_key_name is None
+    assert any("oauth2" in note for note in cfg.notes)
+
+
+def test_generated_code_from_hostile_spec_text_passes_the_lint_gate(tmp_path: Path) -> None:
+    """Quotes, braces, backslashes and docstring terminators in a spec stay inert.
+
+    Each of these once went into the generated source verbatim, where it either broke the
+    module (and with it the server's startup import) or ran as code.
+    """
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": 'Evil "API" {x}', "version": "1"},
+        "servers": [{"url": "https://evil.example"}],
+        "paths": {
+            "/a": {
+                "get": {
+                    "operationId": "lookUp",
+                    "summary": "Say \"hi\" \\ {braces} ''' and more text that runs on for a while",
+                    "description": 'Ends with a quote """ and a backslash \\',
+                    "parameters": [{"name": "q", "in": "query", "required": True}],
+                    "responses": {
+                        "200": {
+                            "content": {
+                                "application/json": {
+                                    "example": {"a-b": 1, 'c"d': "x", "{e}": [{"f-g": "h"}]}
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        },
+    }
+    cfg = parse_openapi_spec(spec, service_name="evil")
+    for name, code in generate_service_code(cfg).items():
+        compile(code, name, "exec")
+        (tmp_path / name).write_text(code)
+
+    for args in (["check"], ["format", "--check"]):
+        result = subprocess.run(
+            ["uv", "run", "ruff", *args, str(tmp_path)],
+            capture_output=True,
+            text=True,
+            cwd=Path(__file__).parent.parent,
+        )
+        assert result.returncode == 0, f"ruff {args[0]} failed:\n{result.stdout}\n{result.stderr}"

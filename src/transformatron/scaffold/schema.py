@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from maltego import entities
@@ -11,13 +12,18 @@ from maltego import entities
 
 @dataclass
 class OutputFieldMapping:
-    """Mapping from a response field to a Maltego entity."""
+    """Mapping from a response field to a Maltego entity.
+
+    ``sub_field`` reaches one level down: into each element when ``is_list`` is set (a list
+    of objects), or into the nested object otherwise.
+    """
 
     field_name: str
     entity_type: str
     label_prefix: str = ""
     strip_prefix: str = ""
     is_list: bool = False
+    sub_field: str | None = None
 
 
 @dataclass
@@ -29,10 +35,17 @@ class ScaffoldTransformConfig:
     input_entity: str
     endpoint_path: str
     input_param_name: str = "input_val"
+    input_location: str = "query"  # "path", "query", or "body"
     http_method: str = "GET"
     output_mappings: list[OutputFieldMapping] = field(default_factory=list)
     description: str = ""
     emit_input_constraint: bool = True
+    # Sent with every request. The entry named by input_param_name is replaced by the
+    # input value at run time when the input travels in that location.
+    query_params: dict[str, Any] = field(default_factory=dict)
+    request_body: dict[str, Any] | None = None
+    body_encoding: str = "json"  # "json" or "form"
+    response_is_list: bool = False
 
     @property
     def output_entity_types(self) -> list[str]:
@@ -56,6 +69,9 @@ class ScaffoldServiceConfig:
     auth_query_param: str | None = None
     auth_type: str = "header"  # "header", "bearer", "query", "none"
     transforms: list[ScaffoldTransformConfig] = field(default_factory=list)
+    # What the scaffolder could not do and the author has to know about: skipped
+    # operations, unsupported authentication, and the like.
+    notes: list[str] = field(default_factory=list)
 
 
 def qualified_entity_type(entity_class_name: str) -> str:
@@ -99,35 +115,84 @@ _HASH_PARAM_RE = re.compile(r"^(hash|md5|sha1|sha256|sha512|checksum)$", re.I)
 _CVE_PARAM_RE = re.compile(r"^(cve|cve_id|vulnerability)$", re.I)
 
 
+_EMAIL_VALUE_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[a-zA-Z]{2,}$")
+_CVE_VALUE_RE = re.compile(r"^CVE-\d{4}-\d+$", re.I)
+_HASH_VALUE_RE = re.compile(r"^[a-fA-F0-9]{32,128}$")
+_DOMAIN_VALUE_RE = re.compile(
+    r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+([a-z]{2,63})\.?$", re.I
+)
+# File extensions that the domain pattern would otherwise accept as a TLD. A path segment
+# like `lookup.json` or `api.php` is a resource name, not a domain to pivot on.
+_FILE_EXTENSIONS = frozenset(
+    {"json", "xml", "php", "html", "htm", "txt", "csv", "asp", "aspx", "jsp", "cgi", "yaml"}
+)
+
+
+def infer_value_entity(value: Any) -> str | None:
+    """Return the entity a value unambiguously looks like, or None.
+
+    Strict on purpose: this decides between entity types from data alone, so a loose
+    rule (any string containing ``:`` as IPv6, say) would turn timestamps into addresses.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError:
+        pass
+    else:
+        return "IPv4Address" if address.version == 4 else "IPv6Address"
+    if text.startswith(("http://", "https://")):
+        return "URL"
+    if _EMAIL_VALUE_RE.match(text):
+        return "EmailAddress"
+    if _CVE_VALUE_RE.match(text):
+        return "CVE"
+    domain = _DOMAIN_VALUE_RE.match(text)
+    if domain and domain.group(1).lower() not in _FILE_EXTENSIONS:
+        return "Domain"
+    return None
+
+
 def infer_input_entity(param_name: str, sample_val: str | None = None) -> tuple[str, str]:
     """Infer the input entity type and validation helper kind from param name and sample value.
+
+    The name is consulted first, then the value.
 
     Returns:
         A tuple of (entity_type, validator_kind), e.g. ("IPv4Address", "ip").
     """
     clean_name = param_name.strip("{}<>:")
-    val = (sample_val or "").strip()
 
-    if _IP_PARAM_RE.match(clean_name) or (
-        val and re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", val)
-    ):
-        return "IPv4Address", "ip"
-    if _IPV6_PARAM_RE.match(clean_name) or (val and ":" in val and len(val) >= 3):
-        return "IPv6Address", "ip"
-    if _DOMAIN_PARAM_RE.match(clean_name) or (
-        val and re.match(r"^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", val) and not val.startswith("http")
-    ):
-        return "Domain", "domain"
-    if _URL_PARAM_RE.match(clean_name) or (
-        val and (val.startswith("http://") or val.startswith("https://"))
-    ):
-        return "URL", "url"
-    if _EMAIL_PARAM_RE.match(clean_name) or (val and "@" in val):
-        return "EmailAddress", "email"
-    if _HASH_PARAM_RE.match(clean_name) or (val and re.match(r"^[a-fA-F0-9]{32,64}$", val)):
+    by_name = (
+        (_IP_PARAM_RE, ("IPv4Address", "ip")),
+        (_IPV6_PARAM_RE, ("IPv6Address", "ip")),
+        (_DOMAIN_PARAM_RE, ("Domain", "domain")),
+        (_URL_PARAM_RE, ("URL", "url")),
+        (_EMAIL_PARAM_RE, ("EmailAddress", "email")),
+        (_HASH_PARAM_RE, ("Hash", "hash")),
+        (_CVE_PARAM_RE, ("CVE", "cve")),
+    )
+    for pattern, result in by_name:
+        if pattern.match(clean_name):
+            return result
+
+    kinds = {
+        "IPv4Address": "ip",
+        "IPv6Address": "ip",
+        "Domain": "domain",
+        "URL": "url",
+        "EmailAddress": "email",
+        "CVE": "cve",
+    }
+    by_value = infer_value_entity(sample_val)
+    if by_value:
+        return by_value, kinds[by_value]
+    if sample_val and _HASH_VALUE_RE.match(sample_val.strip()):
         return "Hash", "hash"
-    if _CVE_PARAM_RE.match(clean_name) or (val and re.match(r"^CVE-\d{4}-\d+$", val, re.I)):
-        return "CVE", "cve"
 
     return "Phrase", "phrase"
 
@@ -167,10 +232,74 @@ _CERT_RE = re.compile(r"^(certificate|cert|ssl_cert|x509|tls_cert)$", re.I)
 _WHOIS_RE = re.compile(r"^(whois|whois_record|whois_data)$", re.I)
 
 
+# Name-based matches that the value may overrule. `name` maps to Person, but a list of DNS
+# answers carries domains and addresses under `name` and `data`; a value that is
+# unambiguously an address or domain is better evidence than a generic key.
+_WEAK_NAME_MATCHES = frozenset({"Phrase", "Person"})
+
+# Envelope fields that describe the response rather than the thing looked up.
+_ENVELOPE_KEYS = frozenset({"status", "ok", "success", "error", "message", "code"})
+
+
 def infer_output_entity(field_name: str, sample_val: Any = None) -> OutputFieldMapping:
     """Infer output entity mapping from a response key and sample value."""
-    key = field_name.strip()
     is_list = isinstance(sample_val, list)
+    mapping = _infer_output_by_name(field_name, is_list)
+    if mapping.entity_type in _WEAK_NAME_MATCHES:
+        first = sample_val[0] if is_list and sample_val else sample_val
+        by_value = infer_value_entity(first)
+        if by_value:
+            return OutputFieldMapping(field_name=field_name, entity_type=by_value, is_list=is_list)
+    return mapping
+
+
+def _title(key: str) -> str:
+    return key.replace("_", " ").title()
+
+
+def infer_output_mappings(record: dict[str, Any]) -> list[OutputFieldMapping]:
+    """Map every field of one response record to an entity.
+
+    Nested data is followed one level: a nested object contributes each of its scalar
+    fields, and a list of objects contributes the element fields that map to a real entity
+    (or, failing that, its first text field). Deeper structure is left for the author —
+    guessing through it produces entities nobody asked for.
+    """
+    mappings: list[OutputFieldMapping] = []
+    for key, value in record.items():
+        if key.lower() in _ENVELOPE_KEYS:
+            continue
+        if isinstance(value, dict):
+            for sub_key, sub_value in value.items():
+                if isinstance(sub_value, dict | list):
+                    continue
+                mapping = infer_output_entity(sub_key, sub_value)
+                label = f"{_title(key)} {_title(sub_key)}: " if mapping.label_prefix else ""
+                mappings.append(
+                    replace(mapping, field_name=key, sub_field=sub_key, label_prefix=label)
+                )
+        elif isinstance(value, list) and value and isinstance(value[0], dict):
+            element = value[0]
+            candidates = [
+                infer_output_entity(sub_key, sub_value)
+                for sub_key, sub_value in element.items()
+                if not isinstance(sub_value, dict | list)
+            ]
+            chosen = [m for m in candidates if m.entity_type != "Phrase"]
+            if not chosen:
+                chosen = [m for m in candidates if isinstance(element[m.field_name], str)][:1]
+            mappings.extend(
+                replace(m, field_name=key, sub_field=m.field_name, is_list=True, label_prefix="")
+                for m in chosen
+            )
+        else:
+            mappings.append(infer_output_entity(key, value))
+    return mappings
+
+
+def _infer_output_by_name(field_name: str, is_list: bool) -> OutputFieldMapping:
+    """Infer an output mapping from the field name alone."""
+    key = field_name
 
     if _AS_RE.match(key):
         return OutputFieldMapping(

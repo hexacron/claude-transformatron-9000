@@ -13,10 +13,11 @@ class ConfigError(RuntimeError):
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# The SDK's ServerHTTPSettings defaults to 127.0.0.1:3000, and the generated
-# project.py sets protocol="http". The skill scripts shipped with the SDK
-# default to port 8080 instead, so the port is always stated explicitly here
-# rather than relying on any single default.
+# The SDK's ServerHTTPSettings defaults to 127.0.0.1:3000, and server/project.py asks for
+# protocol="https" — though the CLI and MCP server override the scheme per start through
+# MALTEGO_SERVER_* variables. The skill scripts shipped with the SDK default to port 8080
+# instead, so the port is always stated explicitly here rather than relying on any single
+# default.
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 3000
 API_PREFIX = "api/v3"

@@ -18,13 +18,31 @@ from transformatron.config import TransformatronConfig
 
 
 def entity_event(value: str, event_type: str = "ADD") -> dict[str, Any]:
+    # The SDK gives every entity an id; the value doubles as one here so each is distinct.
     return {
         "data": {
             "inputType": "ENTITY",
             "eventType": event_type,
-            "entity": {"type": "maltego.Phrase", "value": value},
+            "entity": {"id": value, "type": "maltego.Phrase", "value": value},
         }
     }
+
+
+def entity_update_event(entity_id: str, **fields: Any) -> dict[str, Any]:
+    """An UPDATE as ``to_v3_run_entity_update`` sends it: the id plus only what changed."""
+    return {
+        "data": {
+            "inputType": "ENTITY",
+            "eventType": "UPDATE",
+            "entity": {"id": entity_id, **fields},
+        }
+    }
+
+
+def delete_event(input_type: str, item_id: str) -> dict[str, Any]:
+    """A DELETE as the SDK sends it: only the id of the entity or link being retracted."""
+    key = "entity" if input_type == "ENTITY" else "link"
+    return {"data": {"inputType": input_type, "eventType": "DELETE", key: {"id": item_id}}}
 
 
 def status_event(text: str) -> dict[str, Any]:
@@ -116,12 +134,11 @@ def test_build_run_request_carries_entity_and_settings() -> None:
     assert body["input"]["metadata"]["entitiesTypesStat"] == {"maltego.Domain": 1}
 
 
-def test_collect_events_sorts_by_type_and_skips_deletes() -> None:
+def test_collect_events_sorts_by_type() -> None:
     result = RunResult(run_id="r", state="RUNNING")
     collect_events(
         [
             entity_event("keep"),
-            entity_event("dropped", event_type="DELETE"),
             {"data": {"inputType": "LINK", "eventType": "ADD", "link": {"id": "l1"}}},
             status_event("working"),
         ],
@@ -130,6 +147,72 @@ def test_collect_events_sorts_by_type_and_skips_deletes() -> None:
     assert [e["value"] for e in result.entities] == ["keep"]
     assert len(result.links) == 1
     assert result.messages == ["working"]
+
+
+def test_an_event_without_an_event_type_is_an_add() -> None:
+    """``eventType`` defaults to ADD in the SDK model, so an omitted one still adds."""
+    result = RunResult(run_id="r", state="RUNNING")
+    collect_events([{"data": {"inputType": "ENTITY", "entity": {"id": "e1"}}}], result)
+    assert result.entities == [{"id": "e1"}]
+
+
+def test_an_update_edits_the_entity_instead_of_adding_another() -> None:
+    """A transform that sets a property after add_entity must still count as one entity."""
+    result = RunResult(run_id="r", state="RUNNING")
+    added = entity_event("e1")
+    added["data"]["entity"]["properties"] = [
+        {"name": "value", "type": "STRING", "value": "e1"},
+        {"name": "country", "type": "STRING", "value": "??"},
+    ]
+    collect_events(
+        [
+            added,
+            entity_update_event(
+                "e1",
+                properties=[
+                    {"name": "country", "type": "STRING", "value": "NL"},
+                    {"name": "asn", "type": "STRING", "value": "AS1"},
+                ],
+                note="checked",
+                displayInformation=[{"name": "Seen", "value": "today", "type": "text/plain"}],
+            ),
+        ],
+        result,
+    )
+
+    assert len(result.entities) == 1
+    entity = result.entities[0]
+    assert {p["name"]: p["value"] for p in entity["properties"]} == {
+        "value": "e1",
+        "country": "NL",
+        "asn": "AS1",
+    }
+    assert entity["note"] == "checked"
+    assert [d["name"] for d in entity["displayInformation"]] == ["Seen"]
+    assert entity["type"] == "maltego.Phrase", "fields the update did not carry must survive"
+
+
+def test_an_update_for_an_entity_never_added_is_not_output() -> None:
+    """Editing the input entity emits an UPDATE for an id this run never returned."""
+    result = RunResult(run_id="r", state="RUNNING")
+    collect_events([entity_event("e1"), entity_update_event("0", note="input")], result)
+    assert [e["id"] for e in result.entities] == ["e1"]
+
+
+def test_a_delete_retracts_what_an_earlier_poll_collected() -> None:
+    result = RunResult(run_id="r", state="RUNNING")
+    collect_events(
+        [
+            entity_event("e1"),
+            entity_event("e2"),
+            {"data": {"inputType": "LINK", "eventType": "ADD", "link": {"id": "l1"}}},
+        ],
+        result,
+    )
+    collect_events([delete_event("ENTITY", "e1"), delete_event("LINK", "l1")], result)
+
+    assert [e["id"] for e in result.entities] == ["e2"]
+    assert result.links == []
 
 
 @pytest.mark.parametrize("terminal_state", ["COMPLETED", "FINISHED"])
@@ -281,3 +364,17 @@ async def test_http_error_status_is_reported(
 
     with pytest.raises(TransformServerError, match="404"):
         await TransformClient(config).get_transform("missing")
+
+
+async def test_a_non_json_response_is_a_server_error(
+    config: TransformatronConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another service on the port answers with HTML; that must not surface as a traceback."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>not a transform server</html>")
+
+    patch_handler(monkeypatch, handler)
+
+    with pytest.raises(TransformServerError, match="not JSON: <html>not a transform server"):
+        await TransformClient(config).list_transforms()

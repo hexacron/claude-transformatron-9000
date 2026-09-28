@@ -75,3 +75,29 @@ def test_certificate_loads_into_a_tls_server_context(config: TransformatronConfi
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_3
     context.load_cert_chain(pair.cert_file, pair.key_file)
+
+
+@requires_openssl
+def test_missing_key_regenerates_the_pair(config: TransformatronConfig) -> None:
+    """A certificate without its key cannot be served, so it must not count as present."""
+    generate(config)
+    original_cert = config.cert_file.read_bytes()
+    config.key_file.unlink()
+
+    pair = generate(config)
+
+    assert config.key_file.exists()
+    assert config.cert_file.read_bytes() != original_cert
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(pair.cert_file, pair.key_file)
+
+
+@requires_openssl
+def test_existing_pair_is_kept_without_force(config: TransformatronConfig) -> None:
+    """Regenerating would silently invalidate a certificate the user already trusted."""
+    generate(config)
+    original_cert = config.cert_file.read_bytes()
+
+    generate(config)
+
+    assert config.cert_file.read_bytes() == original_cert
