@@ -110,7 +110,11 @@ async def fetch(
         context.log.fatal(f"CrowdSec CTI lookup failed: {exc.message}")
         return None
 
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError:
+        context.log.fatal("CrowdSec CTI returned a non-JSON response")
+        return None
     if not isinstance(data, dict):
         context.log.fatal("CrowdSec CTI returned an unexpected response shape")
         return None

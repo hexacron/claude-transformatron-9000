@@ -63,7 +63,14 @@ async def _lookup(ip: str, context: MaltegoContext) -> dict[str, Any] | None:
         context.log.fatal(f"ffraud lookup failed: {exc.message}")
         return None
 
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError:
+        context.log.fatal("ffraud returned a non-JSON response")
+        return None
+    if not isinstance(data, dict):
+        context.log.fatal("ffraud returned an unexpected response shape")
+        return None
     if not data.get("success"):
         context.log.inform("ffraud returned no data for the requested address")
         return None

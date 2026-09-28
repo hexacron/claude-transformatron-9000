@@ -6,6 +6,7 @@ or ``AuditWriter`` with real clients when this server needs per-transform
 authorization or an audit trail.
 """
 
+import logging
 from typing import Any
 
 from maltego.middlewares.middlewares import TransformMiddleware
@@ -15,6 +16,10 @@ from maltego.model.exception import MaltegoException
 from maltego.model.graph import MaltegoGraph
 from maltego.model.transform import MaltegoTransform
 from maltego.model.types import ExecutionState, MaltegoSettingTypes
+
+# The per-run audit line belongs in the server log, not in context.log: anything written
+# to context.log is returned to the caller and shown in every run's output in the client.
+logger = logging.getLogger(__name__)
 
 
 class PolicyChecker:
@@ -100,7 +105,7 @@ class AuditMiddleware(TransformMiddleware):
         state: ExecutionState,
         exceptions: list[Exception] | None = None,
     ) -> None:
-        context.log.inform(f"{transform.display_name} finished with state {state}")
+        logger.info("%s finished with state %s", transform.display_name, state.value)
         await self.audit.record(
             identity=context.identity,
             transform_name=transform.display_name,

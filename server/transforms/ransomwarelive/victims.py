@@ -17,27 +17,34 @@ from transforms.ransomwarelive.api import (
     normalise_victim,
 )
 
+# Cap on entities from one search. Applied by each transform *after* its own filtering:
+# capping first would drop an exact match that happened to sort past the limit.
 SEARCH_LIMIT = 100
 
 
 async def _search(
     query: str, settings: dict[str, Any], context: MaltegoContext
-) -> list[dict[str, Any]]:
-    """Return normalised victim records matching `query`."""
+) -> list[dict[str, Any]] | None:
+    """Return every normalised victim record matching `query`, or None on failure.
+
+    None means the search did not happen — bad input, no key, an upstream error — and the
+    cause is already logged. Callers stop there rather than go on to report "no match",
+    which would bury the real cause under a misleading second message.
+    """
     term = query.strip()
     if not term:
         context.log.fatal("Invalid input: expected a company name or domain to search for")
-        return []
+        return None
 
     # `q` is sent as a query parameter, not interpolated into the path, so the
     # HTTP layer handles escaping.
     data = await fetch("/victims/search", settings, context, params={"q": term})
     if data is None:
-        return []
+        return None
 
     victims = [normalise_victim(v) for v in data.get("victims", [])]
     context.log.inform(f"Matched {data.get('count', len(victims))} victim listings")
-    return victims[:SEARCH_LIMIT]
+    return victims
 
 
 @register_transform(
@@ -49,8 +56,12 @@ async def search_victims(
     input_entity: Company, settings: dict[str, Any], context: MaltegoContext
 ) -> list[Company]:
     """Return victim listings whose organisation name matches the input."""
+    victims = await _search(input_entity.value, settings, context)
+    if victims is None:
+        return []
+
     results: list[Company] = []
-    for victim in await _search(input_entity.value, settings, context):
+    for victim in victims[:SEARCH_LIMIT]:
         name = victim["victim"]
         if not name:
             continue
@@ -79,14 +90,18 @@ async def domain_to_breach(
     false attribution.
     """
     domain = input_entity.value.strip().lower().removeprefix("www.")
+    victims = await _search(domain, settings, context)
+    if victims is None:
+        return []
+
     results: list[Company | Malware] = []
     seen_groups: set[str] = set()
-
-    for victim in await _search(domain, settings, context):
-        website = (victim.get("website") or "").strip().lower().removeprefix("www.")
-        if website != domain:
-            continue
-
+    matches = [
+        v
+        for v in victims
+        if (v.get("website") or "").strip().lower().removeprefix("www.") == domain
+    ]
+    for victim in matches[:SEARCH_LIMIT]:
         name = victim["victim"]
         group = victim["group"]
         if name:
@@ -114,7 +129,11 @@ async def victim_details(
     Takes the first exact name match from the search index.
     """
     name = input_entity.value.strip()
-    matches = [v for v in await _search(name, settings, context) if v["victim"].strip() == name]
+    victims = await _search(name, settings, context)
+    if victims is None:
+        return []
+
+    matches = [v for v in victims if v["victim"].strip() == name]
     if not matches:
         context.log.inform("No exact victim match; try Search Victims first")
         return []
@@ -150,13 +169,19 @@ async def victim_to_press(
 ) -> list[URL]:
     """Return press articles covering the attack on a victim organisation."""
     name = input_entity.value.strip()
+    victims = await _search(name, settings, context)
+    if victims is None:
+        return []
+
     results: list[URL] = []
-    for victim in await _search(name, settings, context):
+    for victim in victims:
         if victim["victim"].strip() != name:
             continue
         article = victim.get("press")
         if article:
             results.append(URL(value=article, note=f"Press coverage: {victim['victim']}"))
+            if len(results) >= SEARCH_LIMIT:
+                break
 
     if not results:
         context.log.inform("No press coverage linked to this victim")

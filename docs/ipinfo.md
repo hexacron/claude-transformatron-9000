@@ -51,6 +51,10 @@ empty; the server subprocess inherits the parent shell, so a token exported befo
 server survives restarts. The client setting always wins. **This is for local testing only** — it
 puts the token in the process environment, where anyone who can read `ps` can see it.
 
+The token is sent as an `Authorization: Bearer` header, never as the `?token=` query parameter
+IPinfo also accepts: the server logs every outbound request URL, so a query-string token would be
+written to `server.log`.
+
 ## Transforms
 
 | Transform | Input | Output |
